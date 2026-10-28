@@ -13,7 +13,7 @@ import {
 } from "lucide-react";
 
 import AdminLogin from "./AdminLogin";
-import OrdersPanel from "./ordersPanel";
+import OrdersPanel from "./OrdersPanel";
 import { mapOrder } from "./orderUtils";
 
 const API = "http://localhost:5000";
