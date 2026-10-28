@@ -1,0 +1,197 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+@layer base {
+  h1,
+  h2,
+  h3 {
+    font-family: "Outfit", Inter, ui-sans-serif, system-ui, sans-serif;
+    letter-spacing: -0.01em;
+  }
+
+  ::selection {
+    background: #a6e7fb;
+    color: #0b3b5c;
+  }
+
+  :focus-visible {
+    outline: 3px solid rgba(0, 168, 214, 0.45);
+    outline-offset: 2px;
+  }
+}
+:root {
+  font-family: Inter, ui-sans-serif, system-ui, sans-serif;
+  color: #102a43;
+  background: transparent;
+  font-synthesis: none;
+  text-rendering: optimizeLegibility;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+html {
+  scroll-behavior: smooth;
+}
+
+body {
+  margin: 0;
+  min-width: 320px;
+}
+
+button,
+input {
+  font: inherit;
+}
+
+button {
+  cursor: pointer;
+}
+
+img {
+  display: block;
+  max-width: 100%;
+}
+
+/* Whole-page ocean atmosphere */
+body {
+  background: linear-gradient(120deg,
+      #f0fcff,
+      #e1f8ff,
+      #f5fdff,
+      #dff7ff);
+  background-size: 300% 300%;
+  animation: oceanFlow 18s ease infinite;
+  overflow-x: hidden;
+}
+
+@keyframes oceanFlow {
+  0% {
+    background-position: 0% 50%;
+  }
+
+  50% {
+    background-position: 100% 50%;
+  }
+
+  100% {
+    background-position: 0% 50%;
+  }
+}
+
+/* Respect visitors who prefer reduced motion */
+@media (prefers-reduced-motion: reduce) {
+  body {
+    animation: none;
+  }
+}
+
+/* Full-page underwater decorations */
+.ocean-background {
+  position: fixed;
+  inset: 0;
+  overflow: hidden;
+  pointer-events: none;
+  z-index: 0;
+  opacity: 0.45;
+}
+
+.ocean-bubble {
+  position: absolute;
+  bottom: -60px;
+  width: 12px;
+  height: 12px;
+  border: 1px solid rgba(0, 150, 200, 0.55);
+  border-radius: 50%;
+  animation: bubbleRise 12s linear infinite;
+}
+
+.bubble-1 {
+  left: 12%;
+  animation-delay: 0s;
+}
+
+.bubble-2 {
+  left: 38%;
+  width: 8px;
+  height: 8px;
+  animation-delay: 4s;
+}
+
+.bubble-3 {
+  left: 67%;
+  width: 16px;
+  height: 16px;
+  animation-delay: 7s;
+}
+
+.bubble-4 {
+  left: 88%;
+  animation-delay: 2s;
+}
+
+@keyframes bubbleRise {
+  0% {
+    transform: translateY(0) translateX(0);
+    opacity: 0;
+  }
+
+  15% {
+    opacity: 1;
+  }
+
+  50% {
+    transform: translateY(-50vh) translateX(20px);
+  }
+
+  100% {
+    transform: translateY(-115vh) translateX(-15px);
+    opacity: 0;
+  }
+}
+
+.ocean-fish {
+  position: absolute;
+  left: -80px;
+  font-size: 25px;
+  animation: fishSwim 24s linear infinite;
+}
+
+.fish-1 {
+  top: 22%;
+  animation-delay: 0s;
+}
+
+.fish-2 {
+  top: 55%;
+  font-size: 20px;
+  animation-delay: 8s;
+}
+
+.fish-3 {
+  top: 78%;
+  font-size: 17px;
+  animation-delay: 16s;
+}
+
+@keyframes fishSwim {
+  0% {
+    transform: translateX(-80px);
+  }
+
+  100% {
+    transform: translateX(calc(100vw + 100px));
+  }
+}
+
+/* Keep the decorations accessible and motion-friendly */
+@media (prefers-reduced-motion: reduce) {
+
+  .ocean-background,
+  .ocean-background * {
+    animation: none !important;
+  }
+}
