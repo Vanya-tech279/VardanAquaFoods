@@ -13,7 +13,7 @@ const {
     DELIVERY,
     SLOTS,
     SLOT_CAPACITY,
-    UNPAID_ORDER_MINUTES,
+    PAYMENT,
 } = require("./shopConfig");
 const {
     roundMoney,
@@ -61,7 +61,7 @@ function parseCartItems(items) {
             return { error: "One of the cart items is invalid." };
         }
 
-              // Only whole kilograms between 1 and 50 kg are allowed.
+        // Only whole kilograms between 1 and 50 kg are allowed.
         if (
             !Number.isFinite(quantityKg) ||
             quantityKg < 1 ||
@@ -70,6 +70,7 @@ function parseCartItems(items) {
         ) {
             return { error: "Quantities must be whole kilograms (1 to 50 kg)." };
         }
+
         const key = `${productId}__${size}`;
         const previous = merged.get(key);
 
@@ -191,23 +192,23 @@ async function reserveStock(db, items) {
         const filter = item.legacyProduct
             ? { _id: item.productId, stockKg: { $gte: item.quantityKg } }
             : {
-                  _id: item.productId,
-                  variants: {
-                      $elemMatch: {
-                          size: item.size,
-                          stockKg: { $gte: item.quantityKg },
-                      },
-                  },
-              };
+                _id: item.productId,
+                variants: {
+                    $elemMatch: {
+                        size: item.size,
+                        stockKg: { $gte: item.quantityKg },
+                    },
+                },
+            };
 
         const update = item.legacyProduct
             ? { $inc: { stockKg: -item.quantityKg } }
             : {
-                  $inc: {
-                      "variants.$.stockKg": -item.quantityKg,
-                      stockKg: -item.quantityKg,
-                  },
-              };
+                $inc: {
+                    "variants.$.stockKg": -item.quantityKg,
+                    stockKg: -item.quantityKg,
+                },
+            };
 
         const result = await products.updateOne(filter, update);
 
@@ -223,7 +224,7 @@ async function reserveStock(db, items) {
     return true;
 }
 
-// Gives stock back (used when something fails, and later for cancellations).
+// Gives stock back (used when something fails, and for cancellations).
 async function releaseStock(db, items) {
     const products = db.collection("products");
 
@@ -280,6 +281,63 @@ async function releaseSlot(db, date, slotId, method) {
     );
 }
 
+// ---------- Payment method ----------
+
+// Checks the payment method the customer chose.
+// Returns { method } when allowed, or { error } with a message.
+// There are only two methods: "upi_screenshot" and "cod".
+function choosePaymentMethod(requested, billTotal) {
+    if (!["upi_screenshot", "cod"].includes(requested)) {
+        return { error: "Please choose a payment method." };
+    }
+
+    if (requested === "upi_screenshot") {
+        const settings = PAYMENT.upiScreenshot;
+
+        if (!settings.enabled || !settings.upiId) {
+            return { error: "UPI payment is not available right now." };
+        }
+    }
+
+    if (requested === "cod") {
+        const settings = PAYMENT.cod;
+
+        if (!settings.enabled) {
+            return { error: "Cash payment is not available right now." };
+        }
+
+        if (billTotal > settings.maxOrderTotal) {
+            return {
+                error: `Cash payment is available only for orders up to ₹${settings.maxOrderTotal}. Please pay by UPI.`,
+            };
+        }
+    }
+
+    return { method: requested };
+}
+
+// The payment-related fields each kind of order starts with.
+function buildPaymentFields(method) {
+    if (method === "cod") {
+        // Cash orders are confirmed straight away. Cash is collected later.
+        return {
+            paymentMethod: "COD",
+            paymentStatus: "COD",
+            status: "Confirmed",
+            paymentDueAt: null,
+        };
+    }
+
+    // UPI screenshot order: waiting for the customer's screenshot.
+    return {
+        paymentMethod: "UPI_SCREENSHOT",
+        paymentStatus: "Pending",
+        status: "Pending",
+        paymentDueAt: new Date(
+            Date.now() + PAYMENT.upiScreenshot.payWithinMinutes * 60 * 1000
+        ),
+    };
+}
 // ---------- Shared checkout preparation ----------
 
 // Validates everything and calculates the bill. Used by BOTH the
@@ -293,6 +351,19 @@ async function prepareCheckout(db, customerId, body, requireSlot) {
 
     const cart = parseCartItems(items);
     if (cart.error) return fail(400, cart.error);
+
+    // Takeaway orders need a phone number so the shop can contact the
+    // customer. Delivery orders already have one on the saved address.
+    // The live bill (requireSlot = false) does not need it.
+    let contactPhone = null;
+    console.log("TEMP contactPhone received:", JSON.stringify(body?.contactPhone), "| method:", fulfillmentMethod, "| requireSlot:", requireSlot);
+    if (requireSlot && fulfillmentMethod === "takeaway") {
+        contactPhone = String(body?.contactPhone ?? "").trim();
+
+        if (!/^\d{10}$/.test(contactPhone)) {
+            return fail(400, "Enter a valid 10-digit phone number for pickup.");
+        }
+    }
 
     let slot = null;
 
@@ -348,6 +419,7 @@ async function prepareCheckout(db, customerId, body, requireSlot) {
             slot,
             date: requireSlot ? date : null,
             address,
+            contactPhone,
         },
     };
 }
@@ -375,7 +447,7 @@ function createOrderRoutes({ getDb, requireCustomer }) {
         return indexPromise;
     }
 
-    // PUBLIC: shop details, slots, and the next bookable date.
+    // PUBLIC: shop details, slots, payment options, and the next bookable date.
     router.get("/api/checkout/config", (req, res) => {
         res.json({
             success: true,
@@ -390,8 +462,21 @@ function createOrderRoutes({ getDb, requireCustomer }) {
                 Number.isFinite(SHOP.latitude) &&
                 Number.isFinite(SHOP.longitude),
             maxRadiusKm: DELIVERY.maxRadiusKm,
-               feeTiers: DELIVERY.feeTiers,
-            unpaidOrderMinutes: UNPAID_ORDER_MINUTES,         feeTiers: DELIVERY.feeTiers,
+            feeTiers: DELIVERY.feeTiers,
+            paymentMethods: {
+                upiScreenshot: {
+                    enabled: Boolean(
+                        PAYMENT.upiScreenshot.enabled && PAYMENT.upiScreenshot.upiId
+                    ),
+                    upiId: PAYMENT.upiScreenshot.upiId,
+                    payeeName: PAYMENT.upiScreenshot.payeeName,
+                    payWithinMinutes: PAYMENT.upiScreenshot.payWithinMinutes,
+                },
+                cod: {
+                    enabled: Boolean(PAYMENT.cod.enabled),
+                    maxOrderTotal: PAYMENT.cod.maxOrderTotal,
+                },
+            },
         });
     });
 
@@ -498,8 +583,29 @@ function createOrderRoutes({ getDb, requireCustomer }) {
             }
 
             prepared = result.data;
-            const { fulfillmentMethod, date, slot, address, items, bill } =
-                prepared;
+            const {
+                fulfillmentMethod,
+                date,
+                slot,
+                address,
+                items,
+                bill,
+                contactPhone,
+            } = prepared;
+            // Check the payment method BEFORE anything is reserved.
+            const choice = choosePaymentMethod(
+                req.body?.paymentMethod,
+                bill.total
+            );
+
+            if (choice.error) {
+                return res.status(400).json({
+                    success: false,
+                    message: choice.error,
+                });
+            }
+
+            const paymentFields = buildPaymentFields(choice.method);
 
             // 1) Reserve the slot.
             slotReserved = await reserveSlot(
@@ -535,42 +641,42 @@ function createOrderRoutes({ getDb, requireCustomer }) {
                 customerId: req.customerId,
                 fulfillmentMethod,
                 scheduledDate: date,
+                contactPhone, // pickup phone for takeaway, null for delivery
                 slot: { id: slot.id, label: slot.label },
 
                 pickupLocation:
                     fulfillmentMethod === "takeaway"
                         ? {
-                              name: SHOP.name,
-                              address: SHOP.address,
-                              pinCode: SHOP.pinCode,
-                          }
+                            name: SHOP.name,
+                            address: SHOP.address,
+                            pinCode: SHOP.pinCode,
+                        }
                         : null,
 
                 addressId: address ? address._id : null,
                 deliveryAddress: address
                     ? {
-                          label: address.label,
-                          recipientName: address.recipientName,
-                          phone: address.phone,
-                          houseNumber: address.houseNumber,
-                          street: address.street,
-                          locality: address.locality,
-                          city: address.city,
-                          state: address.state,
-                          pinCode: address.pinCode,
-                          landmark: address.landmark || "",
-                          latitude: address.latitude,
-                          longitude: address.longitude,
-                      }
+                        label: address.label,
+                        recipientName: address.recipientName,
+                        phone: address.phone,
+                        houseNumber: address.houseNumber,
+                        street: address.street,
+                        locality: address.locality,
+                        city: address.city,
+                        state: address.state,
+                        pinCode: address.pinCode,
+                        landmark: address.landmark || "",
+                        latitude: address.latitude,
+                        longitude: address.longitude,
+                    }
                     : null,
 
                 items,
                 bill,
                 totalAmount: bill.total, // used by "My Orders" in the frontend
 
-                status: "Pending",
-                paymentMethod: "UPI",
-                paymentStatus: "Pending",
+                // paymentMethod, paymentStatus, status and paymentDueAt
+                ...paymentFields,
                 stockReserved: true,
 
                 createdAt: new Date(),
@@ -584,6 +690,20 @@ function createOrderRoutes({ getDb, requireCustomer }) {
                 message: "Order created successfully.",
                 orderId: insertResult.insertedId,
                 bill,
+                payment: {
+                    method: choice.method,
+                    status: paymentFields.paymentStatus,
+                    dueAt: paymentFields.paymentDueAt,
+                    // Only sent for UPI orders, so the screen can show where to pay.
+                    upi:
+                        choice.method === "upi_screenshot"
+                            ? {
+                                upiId: PAYMENT.upiScreenshot.upiId,
+                                payeeName: PAYMENT.upiScreenshot.payeeName,
+                                amount: bill.total,
+                            }
+                            : null,
+                },
             });
         } catch (error) {
             console.error("Create order failed:", error.message);

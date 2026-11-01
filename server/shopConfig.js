@@ -51,9 +51,36 @@ const SLOT_CAPACITY = {
 // Dates (YYYY-MM-DD) when the shop is closed, for example holidays.
 const CLOSED_DATES = [];
 
-// How many minutes a customer has to pay before an unpaid order is
-// cancelled and its stock and slot are released.
+// Old Razorpay leftover. Checkout no longer uses it. It stays here only
+// until we have checked orderExpiry.js and adminOrderRoutes.js.
 const UNPAID_ORDER_MINUTES = 15;
+
+// ---------------------------------------------------------------
+// PAYMENT METHODS
+// Change these values here only.
+// ---------------------------------------------------------------
+const PAYMENT = {
+    // Customer pays to your UPI number or ID, then uploads a screenshot
+    // of the payment. You check your bank app and approve the order.
+    upiScreenshot: {
+        enabled: true,
+
+        // Shown to every customer on the checkout screen.
+        upiId: "Q143155676@ybl",
+        payeeName: "Vardan Aqua Foods",
+
+        // Minutes the customer has to pay and upload the screenshot before
+        // the order is cancelled. An order waiting for your approval never expires.
+        payWithinMinutes: 30,
+    },
+
+    // Cash on delivery for delivery orders, and "pay at the shop" for takeaway.
+    cod: {
+        enabled: true,
+        // PLACEHOLDER. Orders above this amount must be paid by UPI.
+        maxOrderTotal: 3000,
+    },
+};
 
 module.exports = {
     SHOP,
@@ -64,4 +91,5 @@ module.exports = {
     SLOT_CAPACITY,
     CLOSED_DATES,
     UNPAID_ORDER_MINUTES,
+    PAYMENT,
 };

@@ -8,7 +8,6 @@ import { Fish, Mail, MapPin, Phone, X } from "lucide-react";
 const BUSINESS = {
   name: "VARDAN AQUA FOODS",
   email: "vardanaquafoods@gmail.com",
-  // TODO: put your real, active support number here (Razorpay asks for it).
   phone: "+91 9381824979",
   phoneHref: "tel:+919381824979",
   supportHours: "Every day, 6:00 AM to 8:00 PM",
@@ -31,7 +30,8 @@ function buildPages(config) {
     shop.pinCode || ""
   }`;
   const radius = config?.maxRadiusKm ?? 6;
-  const unpaidMinutes = config?.unpaidOrderMinutes ?? 15;
+  const unpaidMinutes =
+    config?.paymentMethods?.upiScreenshot?.payWithinMinutes ?? 30;
   const slots = config?.slots || [];
   const slotRange = slots.length
     ? `${slots[0].label.split("–")[0]} to ${
@@ -165,9 +165,11 @@ function buildPages(config) {
         {
           heading: "What we collect",
           body: [
-            "• Your name, email and phone number when you create an account.",
+              "• Your name and email when you create an account.",
+            "• A phone number, for delivery addresses and for takeaway orders.",
             "• Your delivery addresses and their map location, so we can check delivery distance.",
             "• Your orders, cart and payment status.",
+            "• The payment screenshot you upload for UPI orders.",
             "• Your device location, only if you allow it, to check whether we deliver to you.",
           ],
         },
@@ -182,8 +184,7 @@ function buildPages(config) {
         {
           heading: "Payments",
           body: [
-            "Payments are processed by Razorpay. They handle your UPI details under their own privacy policy. We only receive the payment status and a payment reference.",
-          ],
+            "For UPI payments you pay the shop directly from your own UPI app, and we never see your UPI PIN. We keep the payment screenshot you upload only to check your payment, and only the shop's administrator can view it.",          ],
         },
         {
           heading: "Sharing",
@@ -302,7 +303,7 @@ function buildPages(config) {
         {
           heading: "Refund timeline",
           body: [
-            `Approved refunds are sent to your original payment method (the UPI account you paid from). They usually reach you in ${BUSINESS.refundDays} working days after approval. If it takes longer, email us and we will help you track it.`,
+            `Approved refunds for UPI payments are sent back to the UPI account you paid from. They usually reach you in ${BUSINESS.refundDays} working days after approval. If it takes longer, email us and we will help you track it.`,
           ],
         },
       ],
@@ -529,7 +530,6 @@ export default function Footer({ config }) {
           <p>
             © {new Date().getFullYear()} {BUSINESS.name}. All rights reserved.
           </p>
-          <p>Payments are processed securely by Razorpay.</p>
         </div>
       </footer>
 

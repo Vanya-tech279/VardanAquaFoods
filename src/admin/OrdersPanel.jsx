@@ -14,7 +14,6 @@ import {
     MapPin,
     PackageCheck,
 } from "lucide-react";
-
 import {
     ORDER_STATUSES,
     PROGRESS,
@@ -25,6 +24,7 @@ import {
     formatDateTime,
     formatScheduleDate,
 } from "./orderUtils";
+import PaymentActions from "./PaymentActions";
 
 function StatCard({ label, value, note, icon: Icon, color }) {
     const tones = {
@@ -69,9 +69,8 @@ function DetailRow({ label, value }) {
 function StatusPill({ status }) {
     return (
         <span
-            className={`inline-block whitespace-nowrap rounded-full px-3 py-1 text-xs font-bold ring-1 ring-inset ${
-                statusStyles[status] || "bg-slate-50 text-slate-600 ring-slate-200"
-            }`}
+            className={`inline-block whitespace-nowrap rounded-full px-3 py-1 text-xs font-bold ring-1 ring-inset ${statusStyles[status] || "bg-slate-50 text-slate-600 ring-slate-200"
+                }`}
         >
             {status}
         </span>
@@ -83,8 +82,12 @@ function PaymentPill({ payment }) {
         payment === "Paid"
             ? "bg-emerald-50 text-emerald-700"
             : payment === "Pending"
-              ? "bg-amber-50 text-amber-700"
-              : "bg-slate-100 text-slate-600";
+                ? "bg-amber-50 text-amber-700"
+                : payment === "Under review"
+                    ? "bg-violet-50 text-violet-700"
+                    : payment === "COD"
+                        ? "bg-brand-50 text-brand-700"
+                        : "bg-slate-100 text-slate-600";
 
     return (
         <span className={`rounded-full px-3 py-1 text-xs font-bold ${tone}`}>
@@ -99,6 +102,9 @@ export default function OrdersPanel({
     error,
     onReload,
     onUpdateStatus,
+    onLoadProof,
+    onPaymentAction,
+    onCancelOrder,
     mode = "orders",
     onViewAll,
 }) {
@@ -117,6 +123,10 @@ export default function OrdersPanel({
         for (const order of orders) {
             result[order.status] = (result[order.status] || 0) + 1;
         }
+        // "Under review" is a payment state, so it is counted separately.
+        result["Under review"] = orders.filter(
+            (order) => order.payment === "Under review"
+        ).length;
         return result;
     }, [orders]);
 
@@ -125,8 +135,7 @@ export default function OrdersPanel({
 
         return {
             total: orders.length,
-            awaitingPayment: orders.filter((o) => o.status === "Pending").length,
-            toFulfil: orders.filter((o) => toFulfil.includes(o.status)).length,
+            toReview: orders.filter((o) => o.payment === "Under review").length, toFulfil: orders.filter((o) => toFulfil.includes(o.status)).length,
             paidValue: orders
                 .filter((o) => o.payment === "Paid" && o.status !== "Cancelled")
                 .reduce((sum, o) => sum + o.amount, 0),
@@ -140,7 +149,10 @@ export default function OrdersPanel({
 
         return orders.filter((order) => {
             const matchesFilter =
-                activeFilter === "All" || order.status === activeFilter;
+                activeFilter === "All" ||
+                (activeFilter === "Under review"
+                    ? order.payment === "Under review"
+                    : order.status === activeFilter);
 
             const matchesSearch =
                 !query ||
@@ -194,8 +206,8 @@ export default function OrdersPanel({
                 {order.status === "Pending"
                     ? "Awaiting payment"
                     : order.status === "Cancelled"
-                      ? "Cancelled"
-                      : "Finished"}
+                        ? "Cancelled"
+                        : "Finished"}
             </span>
         );
     }
@@ -223,16 +235,23 @@ export default function OrdersPanel({
                         color="blue"
                     />
                     <StatCard
-                        label="Awaiting payment"
-                        value={stats.awaitingPayment}
-                        note="Cancelled automatically if unpaid"
+                        label="Total orders"
+                        value={stats.total}
+                        note="All orders so far"
+                        icon={ShoppingCart}
+                        color="blue"
+                    />
+                    <StatCard
+                        label="Payments to review"
+                        value={stats.toReview}
+                        note="Check your bank or UPI app"
                         icon={Clock3}
                         color="amber"
                     />
                     <StatCard
                         label="To fulfil"
                         value={stats.toFulfil}
-                        note="Paid, not yet delivered"
+                        note="Confirmed, not yet delivered"
                         icon={PackageCheck}
                         color="purple"
                     />
@@ -295,21 +314,19 @@ export default function OrdersPanel({
                         </div>
 
                         <div className="flex flex-wrap gap-2">
-                            {["All", ...ORDER_STATUSES].map((filter) => (
-                                <button
-                                    key={filter}
-                                    onClick={() => setActiveFilter(filter)}
-                                    className={`rounded-full px-3.5 py-2 text-xs font-bold transition ${
-                                        activeFilter === filter
-                                            ? "bg-brand-600 text-white shadow-md shadow-brand-500/30"
-                                            : "bg-slate-100 text-slate-500 hover:bg-brand-50 hover:text-brand-700"
+                            {["All", "Under review", ...ORDER_STATUSES].map((filter) => (<button
+                                key={filter}
+                                onClick={() => setActiveFilter(filter)}
+                                className={`rounded-full px-3.5 py-2 text-xs font-bold transition ${activeFilter === filter
+                                    ? "bg-brand-600 text-white shadow-md shadow-brand-500/30"
+                                    : "bg-slate-100 text-slate-500 hover:bg-brand-50 hover:text-brand-700"
                                     }`}
-                                >
-                                    {filter}
-                                    <span className="ml-1.5 opacity-70">
-                                        {counts[filter] ?? 0}
-                                    </span>
-                                </button>
+                            >
+                                {filter}
+                                <span className="ml-1.5 opacity-70">
+                                    {counts[filter] ?? 0}
+                                </span>
+                            </button>
                             ))}
                         </div>
                     </div>
@@ -486,10 +503,11 @@ export default function OrdersPanel({
                                 This order was cancelled.
                                 {selected.cancelReason ? ` ${selected.cancelReason}` : ""}
                             </p>
-                        ) : selected.payment !== "Paid" ? (
+                        ) : selected.payment !== "Paid" && selected.payment !== "COD" ? (
                             <p className="mt-5 rounded-2xl bg-amber-50 p-4 text-sm text-amber-800">
-                                Waiting for the customer to pay. Unpaid orders are
-                                cancelled automatically.
+                                {selected.payment === "Under review"
+                                    ? "The customer has uploaded a payment screenshot. Check it below."
+                                    : "Waiting for the customer to pay. Unpaid orders are cancelled automatically."}
                             </p>
                         ) : (
                             <ol className="mt-5 flex items-start">
@@ -501,24 +519,21 @@ export default function OrdersPanel({
                                         <li key={step} className="relative flex-1 text-center">
                                             {index > 0 && (
                                                 <span
-                                                    className={`absolute left-[-50%] right-[50%] top-4 h-0.5 ${
-                                                        done ? "bg-brand-500" : "bg-slate-200"
-                                                    }`}
+                                                    className={`absolute left-[-50%] right-[50%] top-4 h-0.5 ${done ? "bg-brand-500" : "bg-slate-200"
+                                                        }`}
                                                 />
                                             )}
                                             <span
-                                                className={`relative mx-auto flex h-8 w-8 items-center justify-center rounded-full text-xs font-extrabold ${
-                                                    done
-                                                        ? "bg-brand-500 text-white"
-                                                        : "bg-slate-200 text-slate-500"
-                                                }`}
+                                                className={`relative mx-auto flex h-8 w-8 items-center justify-center rounded-full text-xs font-extrabold ${done
+                                                    ? "bg-brand-500 text-white"
+                                                    : "bg-slate-200 text-slate-500"
+                                                    }`}
                                             >
                                                 {done ? <CheckCircle2 size={16} /> : index + 1}
                                             </span>
                                             <span
-                                                className={`mt-2 block text-[11px] font-semibold ${
-                                                    done ? "text-brand-700" : "text-slate-400"
-                                                }`}
+                                                className={`mt-2 block text-[11px] font-semibold ${done ? "text-brand-700" : "text-slate-400"
+                                                    }`}
                                             >
                                                 {step}
                                             </span>
@@ -538,9 +553,8 @@ export default function OrdersPanel({
                             />
                             <DetailRow
                                 label="Scheduled for"
-                                value={`${formatScheduleDate(selected.scheduledDate)}${
-                                    selected.slotLabel ? `, ${selected.slotLabel}` : ""
-                                }`}
+                                value={`${formatScheduleDate(selected.scheduledDate)}${selected.slotLabel ? `, ${selected.slotLabel}` : ""
+                                    }`}
                             />
                         </div>
 
@@ -640,12 +654,13 @@ export default function OrdersPanel({
                             </div>
                         </div>
 
-                        {selected.payment === "Paid" && (
-                            <div className="mt-4 space-y-3 rounded-3xl bg-emerald-50/60 p-5">
-                                <DetailRow label="Paid on" value={formatDateTime(selected.paidAt)} />
-                                <DetailRow label="Razorpay payment" value={selected.paymentRef} />
-                            </div>
-                        )}
+                        <PaymentActions
+                            key={selected.id}
+                            order={selected}
+                            onLoadProof={onLoadProof}
+                            onPaymentAction={onPaymentAction}
+                            onCancel={onCancelOrder}
+                        />
 
                         {actionError && (
                             <p className="mt-4 rounded-2xl bg-red-50 p-3 text-sm text-red-700">

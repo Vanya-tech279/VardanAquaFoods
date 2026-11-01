@@ -29,6 +29,17 @@ export const PROGRESS = {
     delivery: ["Confirmed", "Preparing", "Out for delivery", "Delivered"],
 };
 
+// Cash can be marked as collected only from these statuses (same as the backend).
+export const CASH_COLLECTION_STATUSES = [
+    "Out for delivery",
+    "Delivered",
+    "Ready",
+    "Completed",
+];
+
+// An order in one of these statuses can no longer be cancelled (same as the backend).
+export const FINAL_STATUSES = ["Cancelled", "Delivered", "Completed"];
+
 export const statusStyles = {
     Pending: "bg-amber-50 text-amber-700 ring-amber-200",
     Confirmed: "bg-brand-50 text-brand-700 ring-brand-200",
@@ -40,10 +51,25 @@ export const statusStyles = {
     Cancelled: "bg-red-50 text-red-700 ring-red-200",
 };
 
-// Only paid orders can move forward. Returns the next status or null.
+// Paid orders and cash orders ("COD") can move forward. Returns the next status or null.
 export function nextStatusFor(order) {
-    if (order.payment !== "Paid") return null;
+    if (order.payment !== "Paid" && order.payment !== "COD") return null;
     return NEXT_STATUS[order.method]?.[order.status] || null;
+}
+
+// A readable name for how the customer pays.
+export function paymentMethodLabel(order) {
+    if (order.paymentMethod === "UPI_SCREENSHOT") return "UPI (screenshot)";
+
+    if (order.paymentMethod === "COD") {
+        return order.method === "takeaway"
+            ? "Pay at shop (cash or UPI)"
+            : "Pay on delivery (cash or UPI)";
+    }
+
+    if (order.paymentMethod === "UPI") return "Online UPI (old test order)";
+
+    return "Not recorded";
 }
 
 export function formatPrice(amount) {
@@ -101,7 +127,8 @@ export function mapOrder(order) {
         shortId: String(order._id).slice(-6).toUpperCase(),
         customer: order.customer?.name || "Unknown customer",
         email: order.customer?.email || "",
-        phone: address?.phone || "",
+        // Delivery orders use the address phone, takeaway orders the pickup phone.
+        phone: address?.phone || order.contactPhone || "",
         method: order.fulfillmentMethod || "",
         scheduledDate: order.scheduledDate || "",
         slotLabel: order.slot?.label || "",
@@ -124,6 +151,14 @@ export function mapOrder(order) {
         createdAt: order.createdAt,
         paidAt: order.paidAt,
         cancelReason: order.cancelReason || "",
-        paymentRef: order.razorpayPaymentId || "",
+
+        // Payment details for the admin
+        paymentMethod: order.paymentMethod || "",
+        paymentDueAt: order.paymentDueAt || null,
+        hasProof: Boolean(order.manualPayment?.proofPublicId),
+        proofSubmittedAt: order.manualPayment?.submittedAt || null,
+        rejectionReason: order.paymentRejection?.reason || "",
+        cashCollectedAt: order.cashCollectedAt || null,
+        refundDue: Boolean(order.refundDue),
     };
 }

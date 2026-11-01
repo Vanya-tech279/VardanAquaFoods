@@ -8,8 +8,8 @@ const { v2: cloudinary } = require("cloudinary");
 const multer = require("multer");
 const createOrderRoutes = require("./orderRoutes");
 const createLocationRoutes = require("./locationRoutes");
-const createPaymentRoutes = require("./paymentRoutes");
 const createAdminOrderRoutes = require("./adminOrderRoutes");
+const createManualPaymentRoutes = require("./manualPaymentRoutes");
 const startOrderExpiry = require("./orderExpiry");
 require("dotenv").config();
 
@@ -906,7 +906,7 @@ app.get("/api/orders/my", requireCustomer, async (req, res) => {
 });
 app.use(createOrderRoutes({ getDb: () => db, requireCustomer }));
 app.use(createLocationRoutes());
-app.use(createPaymentRoutes({ getDb: () => db, requireCustomer }));
+app.use(createManualPaymentRoutes({ getDb: () => db, requireCustomer }));
 app.use(createAdminOrderRoutes({ getDb: () => db, requireAdmin }));
 // Add a new product
 

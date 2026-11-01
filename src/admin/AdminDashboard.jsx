@@ -130,6 +130,97 @@ export default function AdminDashboard() {
         }
     }
 
+    // Fetches the private payment screenshot. The browser cannot open it
+    // directly, so we ask the server (with the admin token) and show the
+    // image from a temporary local address.
+    async function loadProof(orderId) {
+        try {
+            const response = await fetch(
+                `${API}/api/admin/orders/${orderId}/proof`,
+                { headers: { Authorization: `Bearer ${adminToken}` } }
+            );
+
+            if (response.status === 401 || response.status === 403) {
+                handleLogout();
+                return { ok: false, message: "Your admin session expired." };
+            }
+
+            if (!response.ok) {
+                let message = "Could not load the screenshot.";
+
+                try {
+                    const data = await response.json();
+                    message = data.message || message;
+                } catch {
+                    // keep the default message
+                }
+
+                return { ok: false, message };
+            }
+
+            const blob = await response.blob();
+            return { ok: true, url: URL.createObjectURL(blob) };
+        } catch {
+            return {
+                ok: false,
+                message: "Could not reach the server. Check that the backend is running.",
+            };
+        }
+    }
+
+    // Sends one admin action, then reloads the list. The list is reloaded
+    // even when the action fails, because it may simply be out of date.
+    async function postAdminAction(path, body) {
+        try {
+            const response = await fetch(`${API}${path}`, {
+                method: "POST",
+                headers: {
+                    "Content-Type": "application/json",
+                    Authorization: `Bearer ${adminToken}`,
+                },
+                body: JSON.stringify(body),
+            });
+
+            if (response.status === 401 || response.status === 403) {
+                handleLogout();
+                return { ok: false, message: "Your admin session expired." };
+            }
+
+            let data = {};
+
+            try {
+                data = await response.json();
+            } catch {
+                data = {};
+            }
+
+            await loadOrders({ quiet: true });
+
+            if (!response.ok || !data.success) {
+                return { ok: false, message: data.message || "That did not work." };
+            }
+
+            return { ok: true, message: data.message || "Done." };
+        } catch {
+            return {
+                ok: false,
+                message: "Could not reach the server. Check that the backend is running.",
+            };
+        }
+    }
+
+    // action: "approve" | "reject" | "cod_collected"
+    function paymentAction(orderId, action, reason) {
+        return postAdminAction(`/api/admin/orders/${orderId}/payment`, {
+            action,
+            reason,
+        });
+    }
+
+    function cancelOrder(orderId, reason) {
+        return postAdminAction(`/api/admin/orders/${orderId}/cancel`, { reason });
+    }
+
     // Load orders when signed in, then refresh every 30 seconds.
     useEffect(() => {
         if (!adminToken) return;
@@ -141,313 +232,315 @@ export default function AdminDashboard() {
         // eslint-disable-next-line react-hooks/exhaustive-deps
     }, [adminToken]);
 
-    useEffect(() => {
-        async function loadProducts() {
-            try {
-                setProductsLoading(true);
-                setProductsError("");
+useEffect(() => {
+    async function loadProducts() {
+        try {
+            setProductsLoading(true);
+            setProductsError("");
 
-                const response = await fetch(`${API}/api/products`);
-                const data = await response.json();
+            const response = await fetch(`${API}/api/products`);
+            const data = await response.json();
 
-                const fetchedProducts = Array.isArray(data)
-                    ? data
-                    : data.products;
+            const fetchedProducts = Array.isArray(data)
+                ? data
+                : data.products;
 
-                if (
-                    !response.ok ||
-                    (!Array.isArray(data) && !data.success) ||
-                    !Array.isArray(fetchedProducts)
-                ) {
-                    throw new Error(data.message || "Failed to load products.");
-                }
-
-                setProducts(
-                    fetchedProducts.map((product) => ({
-                        ...product,
-                        id: product._id,
-                        available:
-                            product.available ?? Number(product.stockKg) > 0,
-                    }))
-                );
-            } catch (error) {
-                setProductsError(
-                    error.message || "Could not connect to the backend."
-                );
-            } finally {
-                setProductsLoading(false);
+            if (
+                !response.ok ||
+                (!Array.isArray(data) && !data.success) ||
+                !Array.isArray(fetchedProducts)
+            ) {
+                throw new Error(data.message || "Failed to load products.");
             }
+
+            setProducts(
+                fetchedProducts.map((product) => ({
+                    ...product,
+                    id: product._id,
+                    available:
+                        product.available ?? Number(product.stockKg) > 0,
+                }))
+            );
+        } catch (error) {
+            setProductsError(
+                error.message || "Could not connect to the backend."
+            );
+        } finally {
+            setProductsLoading(false);
         }
-
-        loadProducts();
-    }, []);
-
-    // Paid orders waiting for the shop to start preparing them.
-    const pendingCount = orders.filter(
-        (order) => order.status === "Confirmed"
-    ).length;
-
-    if (!adminToken) {
-        return <AdminLogin onLogin={handleLogin} />;
     }
 
-    return (
-        <div className="min-h-screen bg-brand-50/60 text-slate-900">
-            {sidebarOpen && (
-                <button
-                    aria-label="Close sidebar"
-                    onClick={() => setSidebarOpen(false)}
-                    className="fixed inset-0 z-40 bg-brand-900/40 lg:hidden"
-                />
-            )}
+    loadProducts();
+}, []);
 
-            <aside
-                className={`fixed inset-y-0 left-0 z-50 flex w-64 flex-col bg-brand-900 text-white transition-transform duration-200 lg:translate-x-0 ${
-                    sidebarOpen ? "translate-x-0" : "-translate-x-full"
+// Paid orders waiting for the shop to start preparing them.
+const pendingCount = orders.filter(
+    (order) => order.status === "Confirmed"
+).length;
+
+if (!adminToken) {
+    return <AdminLogin onLogin={handleLogin} />;
+}
+
+return (
+    <div className="min-h-screen bg-brand-50/60 text-slate-900">
+        {sidebarOpen && (
+            <button
+                aria-label="Close sidebar"
+                onClick={() => setSidebarOpen(false)}
+                className="fixed inset-0 z-40 bg-brand-900/40 lg:hidden"
+            />
+        )}
+
+        <aside
+            className={`fixed inset-y-0 left-0 z-50 flex w-64 flex-col bg-brand-900 text-white transition-transform duration-200 lg:translate-x-0 ${sidebarOpen ? "translate-x-0" : "-translate-x-full"
                 }`}
-            >
-                <div className="flex h-20 items-center gap-3 border-b border-white/10 px-6">
-                    <div className="flex h-11 w-11 items-center justify-center rounded-2xl bg-gradient-to-br from-brand-300 to-brand-600 text-white shadow-lg shadow-black/20">
-                        <Fish size={25} />
-                    </div>
-                    <div>
-                        <p className="font-display text-sm font-extrabold tracking-wide">
-                            VARDAN
-                        </p>
-                        <p className="text-xs font-semibold tracking-[0.16em] text-brand-300">
-                            AQUA FOODS
-                        </p>
-                    </div>
-                    <button
-                        aria-label="Close navigation"
-                        onClick={() => setSidebarOpen(false)}
-                        className="ml-auto rounded-lg p-2 text-brand-200 hover:bg-white/10 lg:hidden"
-                    >
-                        <X size={18} />
-                    </button>
+        >
+            <div className="flex h-20 items-center gap-3 border-b border-white/10 px-6">
+                <div className="flex h-11 w-11 items-center justify-center rounded-2xl bg-gradient-to-br from-brand-300 to-brand-600 text-white shadow-lg shadow-black/20">
+                    <Fish size={25} />
                 </div>
-
-                <div className="px-4 pt-7">
-                    <p className="mb-3 px-3 text-[10px] font-bold uppercase tracking-[0.2em] text-brand-300">
-                        Workspace
+                <div>
+                    <p className="font-display text-sm font-extrabold tracking-wide">
+                        VARDAN
                     </p>
+                    <p className="text-xs font-semibold tracking-[0.16em] text-brand-300">
+                        AQUA FOODS
+                    </p>
+                </div>
+                <button
+                    aria-label="Close navigation"
+                    onClick={() => setSidebarOpen(false)}
+                    className="ml-auto rounded-lg p-2 text-brand-200 hover:bg-white/10 lg:hidden"
+                >
+                    <X size={18} />
+                </button>
+            </div>
 
-                    <nav className="space-y-1">
-                        {navItems.map(({ label, icon: Icon }) => (
-                            <button
-                                key={label}
-                                onClick={() => {
-                                    setActiveNav(label);
-                                    setSidebarOpen(false);
-                                }}
-                                className={`flex w-full items-center gap-3 rounded-2xl px-3.5 py-3 text-sm font-semibold transition ${
-                                    activeNav === label
-                                        ? "bg-white text-brand-800 shadow-lg shadow-black/20"
-                                        : "text-brand-100 hover:bg-white/10 hover:text-white"
+            <div className="px-4 pt-7">
+                <p className="mb-3 px-3 text-[10px] font-bold uppercase tracking-[0.2em] text-brand-300">
+                    Workspace
+                </p>
+
+                <nav className="space-y-1">
+                    {navItems.map(({ label, icon: Icon }) => (
+                        <button
+                            key={label}
+                            onClick={() => {
+                                setActiveNav(label);
+                                setSidebarOpen(false);
+                            }}
+                            className={`flex w-full items-center gap-3 rounded-2xl px-3.5 py-3 text-sm font-semibold transition ${activeNav === label
+                                ? "bg-white text-brand-800 shadow-lg shadow-black/20"
+                                : "text-brand-100 hover:bg-white/10 hover:text-white"
                                 }`}
-                            >
-                                <Icon size={19} />
-                                {label}
-                                {label === "Orders" && pendingCount > 0 && (
-                                    <span
-                                        className={`ml-auto rounded-full px-2 py-0.5 text-xs font-bold ${
-                                            activeNav === label
-                                                ? "bg-brand-500 text-white"
-                                                : "bg-white/15 text-white"
+                        >
+                            <Icon size={19} />
+                            {label}
+                            {label === "Orders" && pendingCount > 0 && (
+                                <span
+                                    className={`ml-auto rounded-full px-2 py-0.5 text-xs font-bold ${activeNav === label
+                                        ? "bg-brand-500 text-white"
+                                        : "bg-white/15 text-white"
                                         }`}
-                                    >
-                                        {pendingCount}
-                                    </span>
-                                )}
-                            </button>
-                        ))}
-                    </nav>
-                </div>
-
-                <div className="mt-auto p-4">
-                    <div className="rounded-3xl bg-white/10 p-4">
-                        <div className="mb-3 flex h-9 w-9 items-center justify-center rounded-xl bg-white text-brand-600 shadow-sm">
-                            <ShieldCheckIcon />
-                        </div>
-                        <p className="font-display text-sm font-bold">
-                            Store control center
-                        </p>
-                        <p className="mt-1 text-xs leading-5 text-brand-100">
-                            {pendingCount > 0
-                                ? `${pendingCount} paid ${
-                                      pendingCount === 1 ? "order is" : "orders are"
-                                  } waiting to be prepared.`
-                                : "No paid orders are waiting right now."}
-                        </p>
-                    </div>
-                    <p className="mt-4 text-center text-[10px] text-brand-300">
-                        VARDAN AQUA FOODS · ADMIN
-                    </p>
-                </div>
-            </aside>
-
-            <main className="min-h-screen lg:pl-64">
-                <header className="sticky top-0 z-30 flex h-20 items-center justify-between border-b border-brand-100 bg-white/90 px-4 backdrop-blur-md sm:px-8">
-                    <div className="flex items-center gap-3">
-                        <button
-                            aria-label="Open navigation"
-                            onClick={() => setSidebarOpen(true)}
-                            className="rounded-xl border border-brand-100 p-2.5 text-brand-700 lg:hidden"
-                        >
-                            <Menu size={19} />
-                        </button>
-                        <div>
-                            <p className="text-xs font-medium text-slate-400">
-                                Vardan Aqua Foods / Admin
-                            </p>
-                            <h1 className="mt-0.5 font-display text-lg font-extrabold text-brand-900 sm:text-2xl">
-                                {activeNav}
-                            </h1>
-                        </div>
-                    </div>
-
-                    <div className="flex items-center gap-3">
-                        <span className="hidden items-center gap-2 rounded-full border border-emerald-200 bg-emerald-50 px-3 py-1.5 text-xs font-semibold text-emerald-700 sm:inline-flex">
-                            <span className="h-2 w-2 rounded-full bg-emerald-500" />
-                            Live data
-                        </span>
-                        <button
-                            aria-label="Notifications"
-                            onClick={() => setActiveNav("Orders")}
-                            className="relative rounded-full border border-brand-100 p-2.5 text-brand-600 transition hover:bg-brand-50"
-                        >
-                            <Bell size={19} />
-                            {pendingCount > 0 && (
-                                <span className="absolute right-2 top-2 h-2 w-2 rounded-full bg-red-500 ring-2 ring-white" />
+                                >
+                                    {pendingCount}
+                                </span>
                             )}
                         </button>
-                        <button
-                            onClick={handleLogout}
-                            className="rounded-full border border-brand-100 px-5 py-2.5 text-sm font-bold text-brand-700 transition hover:border-brand-300 hover:bg-brand-50"
-                        >
-                            Log out
-                        </button>
+                    ))}
+                </nav>
+            </div>
+
+            <div className="mt-auto p-4">
+                <div className="rounded-3xl bg-white/10 p-4">
+                    <div className="mb-3 flex h-9 w-9 items-center justify-center rounded-xl bg-white text-brand-600 shadow-sm">
+                        <ShieldCheckIcon />
                     </div>
-                </header>
+                    <p className="font-display text-sm font-bold">
+                        Store control center
+                    </p>
+                    <p className="mt-1 text-xs leading-5 text-brand-100">
+                        {pendingCount > 0
+                            ? `${pendingCount} paid ${pendingCount === 1 ? "order is" : "orders are"
+                            } waiting to be prepared.`
+                            : "No paid orders are waiting right now."}
+                    </p>
+                </div>
+                <p className="mt-4 text-center text-[10px] text-brand-300">
+                    VARDAN AQUA FOODS · ADMIN
+                </p>
+            </div>
+        </aside>
 
-                <div className="mx-auto max-w-[1500px] space-y-7 p-4 sm:p-8">
-                    {activeNav === "Overview" ? (
-                        <>
-                            <section className="relative overflow-hidden rounded-[2rem] bg-gradient-to-br from-brand-900 via-brand-700 to-brand-500 p-6 text-white shadow-xl shadow-brand-500/20 sm:p-10">
-                                <div className="relative z-10 max-w-xl">
-                                    <div className="mb-4 inline-flex items-center gap-2 rounded-full border border-white/20 bg-white/10 px-3.5 py-1.5 text-xs font-semibold">
-                                        <span className="h-2 w-2 rounded-full bg-emerald-300" />
-                                        Admin workspace
-                                    </div>
-                                    <h2 className="font-display text-3xl font-extrabold leading-tight sm:text-4xl">
-                                        Your seafood business,
-                                        <br />
-                                        <span className="text-amber-200">at a glance.</span>
-                                    </h2>
-                                    <p className="mt-3 max-w-md text-sm leading-6 text-brand-100">
-                                        Keep track of incoming orders, payments and
-                                        fulfilment from one simple dashboard.
-                                    </p>
-                                    <button
-                                        onClick={() => setActiveNav("Orders")}
-                                        className="mt-6 inline-flex items-center gap-2 rounded-full bg-white px-6 py-3 text-sm font-bold text-brand-700 shadow-lg shadow-black/20 transition hover:scale-105 active:scale-95"
-                                    >
-                                        View all orders <ShoppingCart size={17} />
-                                    </button>
+        <main className="min-h-screen lg:pl-64">
+            <header className="sticky top-0 z-30 flex h-20 items-center justify-between border-b border-brand-100 bg-white/90 px-4 backdrop-blur-md sm:px-8">
+                <div className="flex items-center gap-3">
+                    <button
+                        aria-label="Open navigation"
+                        onClick={() => setSidebarOpen(true)}
+                        className="rounded-xl border border-brand-100 p-2.5 text-brand-700 lg:hidden"
+                    >
+                        <Menu size={19} />
+                    </button>
+                    <div>
+                        <p className="text-xs font-medium text-slate-400">
+                            Vardan Aqua Foods / Admin
+                        </p>
+                        <h1 className="mt-0.5 font-display text-lg font-extrabold text-brand-900 sm:text-2xl">
+                            {activeNav}
+                        </h1>
+                    </div>
+                </div>
+
+                <div className="flex items-center gap-3">
+                    <span className="hidden items-center gap-2 rounded-full border border-emerald-200 bg-emerald-50 px-3 py-1.5 text-xs font-semibold text-emerald-700 sm:inline-flex">
+                        <span className="h-2 w-2 rounded-full bg-emerald-500" />
+                        Live data
+                    </span>
+                    <button
+                        aria-label="Notifications"
+                        onClick={() => setActiveNav("Orders")}
+                        className="relative rounded-full border border-brand-100 p-2.5 text-brand-600 transition hover:bg-brand-50"
+                    >
+                        <Bell size={19} />
+                        {pendingCount > 0 && (
+                            <span className="absolute right-2 top-2 h-2 w-2 rounded-full bg-red-500 ring-2 ring-white" />
+                        )}
+                    </button>
+                    <button
+                        onClick={handleLogout}
+                        className="rounded-full border border-brand-100 px-5 py-2.5 text-sm font-bold text-brand-700 transition hover:border-brand-300 hover:bg-brand-50"
+                    >
+                        Log out
+                    </button>
+                </div>
+            </header>
+
+            <div className="mx-auto max-w-[1500px] space-y-7 p-4 sm:p-8">
+                {activeNav === "Overview" ? (
+                    <>
+                        <section className="relative overflow-hidden rounded-[2rem] bg-gradient-to-br from-brand-900 via-brand-700 to-brand-500 p-6 text-white shadow-xl shadow-brand-500/20 sm:p-10">
+                            <div className="relative z-10 max-w-xl">
+                                <div className="mb-4 inline-flex items-center gap-2 rounded-full border border-white/20 bg-white/10 px-3.5 py-1.5 text-xs font-semibold">
+                                    <span className="h-2 w-2 rounded-full bg-emerald-300" />
+                                    Admin workspace
                                 </div>
-                                <div className="pointer-events-none absolute -right-12 -top-20 h-72 w-72 rounded-full border-[35px] border-white/10" />
-                                <div className="pointer-events-none absolute -bottom-32 right-24 h-64 w-64 rounded-full bg-brand-300/20 blur-2xl" />
-                                <Fish
-                                    className="pointer-events-none absolute bottom-5 right-8 hidden text-white/20 sm:block"
-                                    size={150}
-                                    strokeWidth={1}
-                                />
-                            </section>
-
-                            <OrdersPanel
-                                mode="overview"
-                                orders={orders}
-                                loading={ordersLoading}
-                                error={ordersError}
-                                onReload={() => loadOrders()}
-                                onUpdateStatus={updateOrderStatus}
-                                onViewAll={() => setActiveNav("Orders")}
+                                <h2 className="font-display text-3xl font-extrabold leading-tight sm:text-4xl">
+                                    Your seafood business,
+                                    <br />
+                                    <span className="text-amber-200">at a glance.</span>
+                                </h2>
+                                <p className="mt-3 max-w-md text-sm leading-6 text-brand-100">
+                                    Keep track of incoming orders, payments and
+                                    fulfilment from one simple dashboard.
+                                </p>
+                                <button
+                                    onClick={() => setActiveNav("Orders")}
+                                    className="mt-6 inline-flex items-center gap-2 rounded-full bg-white px-6 py-3 text-sm font-bold text-brand-700 shadow-lg shadow-black/20 transition hover:scale-105 active:scale-95"
+                                >
+                                    View all orders <ShoppingCart size={17} />
+                                </button>
+                            </div>
+                            <div className="pointer-events-none absolute -right-12 -top-20 h-72 w-72 rounded-full border-[35px] border-white/10" />
+                            <div className="pointer-events-none absolute -bottom-32 right-24 h-64 w-64 rounded-full bg-brand-300/20 blur-2xl" />
+                            <Fish
+                                className="pointer-events-none absolute bottom-5 right-8 hidden text-white/20 sm:block"
+                                size={150}
+                                strokeWidth={1}
                             />
-                        </>
-                    ) : activeNav === "Orders" ? (
+                        </section>
+
                         <OrdersPanel
-                            mode="orders"
+                            mode="overview"
                             orders={orders}
                             loading={ordersLoading}
                             error={ordersError}
                             onReload={() => loadOrders()}
                             onUpdateStatus={updateOrderStatus}
+                            onLoadProof={loadProof}
+                            onPaymentAction={paymentAction}
+                            onCancelOrder={cancelOrder}
+                            onViewAll={() => setActiveNav("Orders")}
                         />
-                    ) : activeNav === "Products & Stock" ? (
-                        productsLoading ? (
-                            <section className="rounded-3xl border border-brand-100 bg-white p-10 text-center">
-                                <p className="font-semibold text-slate-700">
-                                    Loading products from MongoDB...
-                                </p>
-                            </section>
-                        ) : productsError ? (
-                            <section className="rounded-3xl border border-red-200 bg-white p-8">
-                                <h2 className="text-lg font-bold text-red-700">
-                                    Could not load inventory
-                                </h2>
-                                <p className="mt-2 text-sm text-slate-600">
-                                    {productsError}
-                                </p>
-                                <button
-                                    onClick={() => window.location.reload()}
-                                    className="mt-4 rounded-full bg-brand-600 px-5 py-2 text-sm font-bold text-white"
-                                >
-                                    Retry
-                                </button>
-                            </section>
-                        ) : (
-                            <InventoryScreen
-                                products={products}
-                                setProducts={setProducts}
-                                editingProduct={editingProduct}
-                                setEditingProduct={setEditingProduct}
-                                editValues={editValues}
-                                setEditValues={setEditValues}
-                                adminToken={adminToken}
-                            />
-                        )
-                    ) : (
-                        <section className="rounded-[2rem] border border-brand-100 bg-white p-8 shadow-soft sm:p-12">
-                            <div className="flex h-14 w-14 items-center justify-center rounded-2xl bg-brand-50 text-brand-600">
-                                {activeNav === "Customers" ? (
-                                    <Users size={27} />
-                                ) : (
-                                    <Settings size={27} />
-                                )}
-                            </div>
-                            <h2 className="mt-5 font-display text-2xl font-extrabold text-brand-900">
-                                {activeNav}
+                    </>
+                ) : activeNav === "Orders" ? (
+                    <OrdersPanel
+                        mode="orders"
+                        orders={orders}
+                        loading={ordersLoading}
+                        error={ordersError}
+                        onReload={() => loadOrders()}
+                        onUpdateStatus={updateOrderStatus}
+                        onLoadProof={loadProof}
+                        onPaymentAction={paymentAction}
+                        onCancelOrder={cancelOrder}
+                    />
+                ) : activeNav === "Products & Stock" ? (
+                    productsLoading ? (
+                        <section className="rounded-3xl border border-brand-100 bg-white p-10 text-center">
+                            <p className="font-semibold text-slate-700">
+                                Loading products from MongoDB...
+                            </p>
+                        </section>
+                    ) : productsError ? (
+                        <section className="rounded-3xl border border-red-200 bg-white p-8">
+                            <h2 className="text-lg font-bold text-red-700">
+                                Could not load inventory
                             </h2>
-                            <p className="mt-2 max-w-lg text-sm leading-6 text-slate-500">
-                                This section will be developed in a later phase.
+                            <p className="mt-2 text-sm text-slate-600">
+                                {productsError}
                             </p>
                             <button
-                                onClick={() => setActiveNav("Overview")}
-                                className="mt-6 rounded-full bg-gradient-to-r from-brand-500 to-brand-700 px-6 py-3 text-sm font-bold text-white shadow-md shadow-brand-500/30 transition hover:opacity-90"
+                                onClick={() => window.location.reload()}
+                                className="mt-4 rounded-full bg-brand-600 px-5 py-2 text-sm font-bold text-white"
                             >
-                                Back to overview
+                                Retry
                             </button>
                         </section>
-                    )}
+                    ) : (
+                        <InventoryScreen
+                            products={products}
+                            setProducts={setProducts}
+                            editingProduct={editingProduct}
+                            setEditingProduct={setEditingProduct}
+                            editValues={editValues}
+                            setEditValues={setEditValues}
+                            adminToken={adminToken}
+                        />
+                    )
+                ) : (
+                    <section className="rounded-[2rem] border border-brand-100 bg-white p-8 shadow-soft sm:p-12">
+                        <div className="flex h-14 w-14 items-center justify-center rounded-2xl bg-brand-50 text-brand-600">
+                            {activeNav === "Customers" ? (
+                                <Users size={27} />
+                            ) : (
+                                <Settings size={27} />
+                            )}
+                        </div>
+                        <h2 className="mt-5 font-display text-2xl font-extrabold text-brand-900">
+                            {activeNav}
+                        </h2>
+                        <p className="mt-2 max-w-lg text-sm leading-6 text-slate-500">
+                            This section will be developed in a later phase.
+                        </p>
+                        <button
+                            onClick={() => setActiveNav("Overview")}
+                            className="mt-6 rounded-full bg-gradient-to-r from-brand-500 to-brand-700 px-6 py-3 text-sm font-bold text-white shadow-md shadow-brand-500/30 transition hover:opacity-90"
+                        >
+                            Back to overview
+                        </button>
+                    </section>
+                )}
 
-                    <footer className="flex flex-col gap-2 pb-3 text-xs text-slate-400 sm:flex-row sm:justify-between">
-                        <span>© VARDAN AQUA FOODS</span>
-                        <span>Admin dashboard</span>
-                    </footer>
-                </div>
-            </main>
-        </div>
-    );
+                <footer className="flex flex-col gap-2 pb-3 text-xs text-slate-400 sm:flex-row sm:justify-between">
+                    <span>© VARDAN AQUA FOODS</span>
+                    <span>Admin dashboard</span>
+                </footer>
+            </div>
+        </main>
+    </div>
+);
 }
 
 function ShieldCheckIcon() {

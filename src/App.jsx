@@ -3,7 +3,7 @@ import AuthModal from "./components/AuthModal";
 import AddressFormModal from "./components/AddressFormModal";
 import LocationBanner from "./components/LocationBanner";
 import useDeliveryLocation from "./hooks/useDeliveryLocation";
-import { loadRazorpay, openRazorpayCheckout } from "./lib/razorpay";
+import UpiPaymentBox from "./components/UpiPaymentBox";
 import Footer from "./components/Footer";
 import {
   Fish,
@@ -22,7 +22,8 @@ import {
   ChevronDown,
   CheckCircle2,
   XCircle,
-  Loader2,
+  Smartphone,
+  Banknote,
 } from "lucide-react";
 
 /* ------------------------------------------------------------------
@@ -32,11 +33,6 @@ import {
 // Where the backend lives. Set VITE_API_URL in the root .env when you deploy.
 const API_URL = import.meta.env.VITE_API_URL || "http://localhost:5000";
 
-// Brand colours. Change the whole site's accent here.
-const colors = {
-  aqua: "#00A8D6",
-  aquaDark: "#0077B6",
-};
 
 // Seafood is sold in steps of this many kg (the backend accepts 0.5 kg steps).
 const STEP_KG = 1;
@@ -90,7 +86,10 @@ const FALLBACK_CONFIG = {
     { id: "1030-1130", label: "10:30 AM–11:30 AM" },
   ],
   deliveryEnabled: true,
-  unpaidOrderMinutes: 15,
+  paymentMethods: {
+    upiScreenshot: { enabled: false, upiId: "", payeeName: "" },
+    cod: { enabled: false, maxOrderTotal: 0 },
+  },
   maxRadiusKm: 6,
   feeTiers: [
     { upToKm: 3, fee: 30 },
@@ -458,62 +457,6 @@ function FulfillmentCard({ active, disabled, icon: Icon, title, text, onSelect }
     </button>
   );
 }
-// Amber box for an order that is saved but not paid yet. It counts down
-// the minutes left and shows a "Pay now" button. The server is the real
-// judge of time: it cancels the order once the limit passes.
-function UnpaidNotice({ order, limitMinutes, paying, disabled, onPay }) {
-  const [now, setNow] = useState(() => Date.now());
-
-  // Refresh the countdown every 15 seconds.
-  useEffect(() => {
-    const timer = setInterval(() => setNow(Date.now()), 15000);
-    return () => clearInterval(timer);
-  }, []);
-
-  const isUnpaid =
-    order.status === "Pending" &&
-    (order.paymentStatus || "Pending") === "Pending";
-
-  if (!isUnpaid) return null;
-
-  const createdMs = new Date(order.createdAt).getTime();
-  const hasTime = Number.isFinite(createdMs);
-  const minutesLeft = hasTime
-    ? Math.ceil((createdMs + limitMinutes * 60000 - now) / 60000)
-    : null;
-
-  // Time is up. The server cancels the order within a minute.
-  if (hasTime && minutesLeft <= 0) {
-    return (
-      <p className="mt-3 rounded-2xl bg-amber-50 p-3 text-sm text-amber-800">
-        The payment time is over. This order will be cancelled shortly.
-      </p>
-    );
-  }
-
-  return (
-    <div className="mt-3 rounded-2xl border border-amber-200 bg-amber-50 p-4 text-sm text-amber-800">
-      <p className="flex items-center gap-2 font-semibold">
-        <Clock size={16} />
-        {hasTime
-          ? `Pay within ${minutesLeft} ${minutesLeft === 1 ? "minute" : "minutes"}`
-          : `Pay within ${limitMinutes} minutes`}
-      </p>
-      <p className="mt-0.5 text-xs">
-        Unpaid orders are cancelled automatically after {limitMinutes} minutes.
-      </p>
-      <button
-        type="button"
-        onClick={onPay}
-        disabled={disabled}
-        className="mt-3 rounded-full bg-gradient-to-r from-brand-500 to-brand-700 px-5 py-2 text-sm font-bold text-white shadow-md shadow-brand-500/30 transition hover:opacity-90 active:scale-95 disabled:cursor-not-allowed disabled:opacity-50"
-      >
-        {paying ? "Opening payment..." : "Pay now"}
-      </button>
-    </div>
-  );
-}
-
 const STATUS_STYLES = {
   Pending: "bg-amber-50 text-amber-700 ring-amber-200",
   Confirmed: "bg-brand-50 text-brand-700 ring-brand-200",
@@ -525,10 +468,31 @@ const STATUS_STYLES = {
   Cancelled: "bg-red-50 text-red-700 ring-red-200",
 };
 
-function OrderCard({ order, limitMinutes, paying, payDisabled, onPay }) {
+function OrderCard({ order, upiSettings, onPaymentSubmitted, onAuthExpired }) {
   const method = order.fulfillmentMethod;
   const total = order.bill?.total ?? order.totalAmount ?? 0;
   const status = order.status || "Pending";
+  const paymentStatus = order.paymentStatus || "Pending";
+  const paymentMethod = String(order.paymentMethod || "").toUpperCase();
+  const isCod = paymentMethod === "COD";
+
+  // Show the UPI box only while the customer still has something to do,
+  // or while the admin is checking the screenshot.
+  const showUpiBox =
+    paymentMethod === "UPI_SCREENSHOT" &&
+    status === "Pending" &&
+    (paymentStatus === "Pending" || paymentStatus === "Under review");
+
+  // The admin's rejection reason (saved by the reject action).
+  const rejectedReason = order.paymentRejection?.reason || "";
+  const paymentLabel =
+    paymentStatus === "Paid"
+      ? "Paid"
+      : isCod
+        ? method === "takeaway"
+          ? "Pay at shop"
+          : "Pay on delivery"
+        : paymentStatus;
 
   return (
     <div className="rounded-3xl border border-brand-100 bg-white p-5 shadow-soft">
@@ -589,22 +553,29 @@ function OrderCard({ order, limitMinutes, paying, payDisabled, onPay }) {
         </ul>
       )}
 
-      <UnpaidNotice
-        order={order}
-        limitMinutes={limitMinutes}
-        paying={paying}
-        disabled={payDisabled}
-        onPay={onPay}
-      />
+      {showUpiBox && (
+        <UpiPaymentBox
+          orderId={String(order._id)}
+          orderNumber={String(order._id).slice(-6).toUpperCase()}
+          amountText={formatPrice(total)}
+          dueAt={order.paymentDueAt}
+          paymentStatus={paymentStatus}
+          rejectedReason={paymentStatus === "Pending" ? rejectedReason : ""}
+          upi={upiSettings}
+          apiUrl={API_URL}
+          onSubmitted={onPaymentSubmitted}
+          onAuthExpired={onAuthExpired}
+        />
+      )}
 
       <div className="mt-4 flex items-center justify-between border-t border-slate-100 pt-4">
         <span
-          className={`rounded-full px-3 py-1 text-xs font-semibold ${order.paymentStatus === "Paid"
+          className={`rounded-full px-3 py-1 text-xs font-semibold ${paymentStatus === "Paid"
             ? "bg-emerald-50 text-emerald-700"
             : "bg-slate-100 text-slate-600"
             }`}
         >
-          Payment: {order.paymentStatus || "Pending"}
+          Payment: {paymentLabel}
         </span>
         <span className="font-display text-xl font-extrabold text-brand-900">
           {formatPrice(total)}
@@ -687,14 +658,10 @@ export default function App() {
   const [placingOrder, setPlacingOrder] = useState(false);
   const [orderError, setOrderError] = useState("");
   const [orderResult, setOrderResult] = useState(null);
-  const [paymentState, setPaymentState] = useState("idle"); // idle | opening | verifying | paid | unpaid
-  // True while we are still waiting to learn whether the payment worked.
-  const paymentBusy =
-    paymentState === "idle" ||
-    paymentState === "opening" ||
-    paymentState === "verifying";
-  const [paymentMessage, setPaymentMessage] = useState("");
-  const [payingOrderId, setPayingOrderId] = useState(""); // "Pay now" in My orders
+  // "upi_screenshot" or "cod". UPI is pre-selected.
+  const [paymentMethod, setPaymentMethod] = useState("upi_screenshot");
+  // Phone number for takeaway orders (digits only).
+  const [contactPhone, setContactPhone] = useState("");
   /* ----------------------------- derived data ----------------------------- */
 
   const displayProducts = backendProducts;
@@ -775,14 +742,39 @@ export default function App() {
   );
   const selectedSlot = slotData.slots.find((slot) => slot.id === selectedSlotId);
 
+  // Payment options come from the backend settings.
+  const upiOn = Boolean(config.paymentMethods?.upiScreenshot?.enabled);
+  const codOn = Boolean(config.paymentMethods?.cod?.enabled);
+  const codLimit = Number(config.paymentMethods?.cod?.maxOrderTotal) || 0;
+  const codTooBig = Boolean(quote) && quote.bill.total > codLimit;
+
+  // The payment method that is really usable right now ("" = none).
+  const selectedPayment =
+    (paymentMethod === "upi_screenshot" && upiOn) ||
+      (paymentMethod === "cod" && codOn && !codTooBig)
+      ? paymentMethod
+      : "";
+
+  // After the order is placed: is it already confirmed?
+  const placedWithCod = orderResult?.paymentMethod === "cod";
+  const placedConfirmed =
+    placedWithCod || orderResult?.paymentStatus === "Paid";
+
   // Why the "Place order" button is not ready yet (empty when it is ready).
   let blockReason = "";
   if (hasOutOfStockItems) {
     blockReason = "Remove out-of-stock items from your cart.";
   } else if (fulfillmentMethod === "delivery" && !selectedAddressId) {
     blockReason = "Select a delivery address.";
+  } else if (
+    fulfillmentMethod === "takeaway" &&
+    !/^\d{10}$/.test(contactPhone)
+  ) {
+    blockReason = "Enter a 10-digit phone number for pickup.";
   } else if (!selectedSlotId) {
     blockReason = "Choose a time slot.";
+  } else if (!selectedPayment) {
+    blockReason = "Choose how you want to pay.";
   } else if (quoteError) {
     blockReason = quoteError;
   } else if (quoteLoading || !quote) {
@@ -1230,8 +1222,6 @@ export default function App() {
     setCheckoutOpen(false);
     setOrderResult(null);
     setOrderError("");
-    setPaymentState("idle");
-    setPaymentMessage("");
   }
 
   function chooseFulfillment(method) {
@@ -1242,121 +1232,6 @@ export default function App() {
     setQuote(null);
     setQuoteError("");
     setOrderError("");
-  }
-  // Opens the UPI popup for a saved order, then asks the backend to verify.
-  // Opens the UPI popup for a saved order, then asks the backend to verify.
-  // Returns { status: "paid" | "unpaid" | "auth", message }.
-  // track = false is used from "My orders", where the checkout card is
-  // closed, so the card's payment state must stay untouched.
-  async function startPayment(orderId, { track = true } = {}) {
-    const setState = (value) => {
-      if (track) setPaymentState(value);
-    };
-    const setMessage = (value) => {
-      if (track) setPaymentMessage(value);
-    };
-
-    setState("opening");
-    setMessage("");
-
-    try {
-      const scriptReady = await loadRazorpay();
-
-      if (!scriptReady) {
-        throw new Error(
-          "We could not load the payment window. Check your internet and try again."
-        );
-      }
-
-      // 1) The backend creates the payment and tells us the real amount.
-      const created = await apiRequest("/api/payments/create-order", {
-        method: "POST",
-        auth: true,
-        body: { orderId },
-      });
-
-      if (created.status === 401) {
-        handleAuthExpired();
-        return { status: "auth", message: "" };
-      }
-
-      if (!created.ok || !created.data.success) {
-        throw new Error(created.data.message || "Unable to start the payment.");
-      }
-
-      // 2) The customer pays in Razorpay's popup.
-      const result = await openRazorpayCheckout({
-        keyId: created.data.keyId,
-        razorpayOrderId: created.data.razorpayOrderId,
-        amount: created.data.amount,
-        currency: created.data.currency,
-        description: "Seafood pre-order",
-        prefill: { name: authUser?.name, email: authUser?.email },
-        themeColor: colors.aqua,
-      });
-
-      if (result.status !== "paid") {
-        const message = result.lastError
-          ? `Payment was not completed: ${result.lastError}`
-          : "Payment was not completed.";
-        setState("unpaid");
-        setMessage(message);
-        return { status: "unpaid", message };
-      }
-
-      // 3) The backend checks Razorpay's signature. Only it can say "paid".
-      setState("verifying");
-
-      const verified = await apiRequest("/api/payments/verify", {
-        method: "POST",
-        auth: true,
-        body: {
-          orderId,
-          razorpay_order_id: result.response.razorpay_order_id,
-          razorpay_payment_id: result.response.razorpay_payment_id,
-          razorpay_signature: result.response.razorpay_signature,
-        },
-      });
-
-      if (!verified.ok || !verified.data.success) {
-        const message =
-          verified.data.message || "We could not confirm your payment.";
-        setState("unpaid");
-        setMessage(message);
-        return { status: "unpaid", message };
-      }
-
-      setState("paid");
-      return { status: "paid", message: "" };
-    } catch (error) {
-      const message =
-        error.message || "Something went wrong with the payment.";
-      setState("unpaid");
-      setMessage(message);
-      return { status: "unpaid", message };
-    }
-  }
-
-  // "Pay now" on an unpaid order in My orders.
-  async function handlePayNow(order) {
-    if (payingOrderId) return;
-
-    setPayingOrderId(String(order._id));
-
-    const outcome = await startPayment(String(order._id), { track: false });
-
-    setPayingOrderId("");
-
-    if (outcome.status === "paid") {
-      showToast("Payment received. Your order is confirmed.");
-    } else if (outcome.status === "unpaid") {
-      showToast(outcome.message || "Payment was not completed.");
-    }
-
-    // Reload the list so the order shows its new status.
-    if (outcome.status !== "auth") {
-      await handleFetchMyOrders({ quiet: true });
-    }
   }
   async function handlePlaceOrder() {
     if (placingOrder || blockReason) return;
@@ -1375,6 +1250,9 @@ export default function App() {
             fulfillmentMethod === "delivery" ? selectedAddressId : undefined,
           date: slotData.date,
           slotId: selectedSlotId,
+          paymentMethod: selectedPayment,
+          contactPhone:
+            fulfillmentMethod === "takeaway" ? contactPhone : undefined,
         },
       });
 
@@ -1400,6 +1278,10 @@ export default function App() {
         date: slotData.date,
         slotLabel: selectedSlot?.label || "",
         address: fulfillmentMethod === "delivery" ? selectedAddress : null,
+        paymentMethod: data.payment?.method || selectedPayment,
+        paymentStatus: data.payment?.status || "Pending",
+        paymentDueAt: data.payment?.dueAt || null,
+        upi: data.payment?.upi || null,
       });
 
       // The order is saved, so empty the cart.
@@ -1407,15 +1289,13 @@ export default function App() {
       if (authUser?.id) {
         localStorage.removeItem(`vafCart_${authUser.id}`);
       }
-
-      // Open the UPI popup straight away.
-      startPayment(String(data.orderId));
     } catch (error) {
       setOrderError(error.message || "Something went wrong.");
     } finally {
       setPlacingOrder(false);
     }
   }
+
 
   /* --------------------------------- render --------------------------------- */
 
@@ -1677,7 +1557,7 @@ export default function App() {
                   <Store size={16} /> Shop takeaway
                 </li>
                 <li className="inline-flex items-center gap-2 rounded-full bg-white/15 px-4 py-2 backdrop-blur">
-                  <CheckCircle2 size={16} /> Pay by UPI
+                  <CheckCircle2 size={16} /> Pay by UPI or cash
                 </li>
               </ul>
             </div>
@@ -2138,33 +2018,22 @@ export default function App() {
                 /* ---------------- Order placed ---------------- */
                 <div className="p-6 text-center sm:p-10">
                   <div
-                    className={`mx-auto flex h-20 w-20 items-center justify-center rounded-full ${paymentBusy
-                      ? "bg-brand-50"
-                      : paymentState === "paid"
-                        ? "bg-emerald-50"
-                        : "bg-amber-50"
+                    className={`mx-auto flex h-20 w-20 items-center justify-center rounded-full ${placedConfirmed ? "bg-emerald-50" : "bg-amber-50"
                       }`}
                   >
-                    {paymentBusy ? (
-                      <Loader2 className="h-10 w-10 animate-spin text-brand-500" />
-                    ) : paymentState === "paid" ? (
+                    {placedConfirmed ? (
                       <CheckCircle2 className="animate-pop h-10 w-10 text-emerald-600" />
                     ) : (
                       <Clock className="h-10 w-10 text-amber-500" />
                     )}
                   </div>
                   <h2 className="mt-5 font-display text-3xl font-extrabold text-brand-900">
-                    {paymentBusy
-                      ? "Confirming your payment..."
-                      : paymentState === "paid"
-                        ? "Order confirmed"
-                        : "Payment pending"}
+                    {placedConfirmed
+                      ? "Order confirmed"
+                      : orderResult.paymentStatus === "Under review"
+                        ? "We are checking your payment"
+                        : "Pay to confirm your order"}
                   </h2>
-                  {paymentBusy && (
-                    <p className="mt-1 text-sm text-slate-500">
-                      Please don't close this window.
-                    </p>
-                  )}
                   <p className="mt-2 inline-block rounded-full bg-brand-50 px-4 py-1 text-sm font-bold tracking-wide text-brand-700">
                     Order #{String(orderResult.orderId).slice(-6).toUpperCase()}
                   </p>
@@ -2220,42 +2089,56 @@ export default function App() {
                       </p>
                     </div>
                     <span
-                      className={`rounded-full px-4 py-1.5 text-xs font-bold ${paymentState === "paid"
+                      className={`rounded-full px-4 py-1.5 text-xs font-bold ${orderResult.paymentStatus === "Paid"
                         ? "bg-emerald-50 text-emerald-700"
-                        : "bg-amber-50 text-amber-700"
+                        : placedWithCod
+                          ? "bg-brand-50 text-brand-700"
+                          : "bg-amber-50 text-amber-700"
                         }`}
                     >
-                      {paymentState === "paid"
+                      {orderResult.paymentStatus === "Paid"
                         ? "Paid"
-                        : paymentBusy
-                          ? "Processing..."
-                          : "Payment pending"}
+                        : placedWithCod
+                          ? orderResult.method === "takeaway"
+                            ? "Pay at shop"
+                            : "Pay on delivery"
+                          : orderResult.paymentStatus === "Under review"
+                            ? "Under review"
+                            : "Payment pending"}
                     </span>
                   </div>
 
-                  {paymentState === "paid" && (
+                  {placedWithCod && (
                     <p className="mt-2 text-left text-xs text-emerald-700">
-                      Payment received by UPI. Your order is confirmed.
+                      Your order is confirmed. Please keep{" "}
+                      {formatPrice(orderResult.bill?.total)} ready to pay{" "}
+                      {orderResult.method === "takeaway"
+                        ? "when you collect it."
+                        : "when it arrives."}
                     </p>
                   )}
 
-                  {paymentState === "unpaid" && (
-                    <div className="mt-3 rounded-3xl bg-amber-50 p-4 text-left text-sm text-amber-800">
-                      <p>{paymentMessage}</p>
-                      <p className="mt-1 text-xs">
-                        Your order is saved but not paid yet. Pay within{" "}
-                        {config.unpaidOrderMinutes} minutes to confirm it, or it
-                        will be cancelled automatically. You can also pay later
-                        from My orders.
-                      </p>
-                      <button
-                        type="button"
-                        onClick={() => startPayment(String(orderResult.orderId))}
-                        className="mt-3 rounded-full bg-gradient-to-r from-brand-500 to-brand-700 px-5 py-2.5 text-sm font-bold text-white shadow-md shadow-brand-500/30 transition hover:opacity-90 active:scale-95"
-                      >
-                        Pay with UPI
-                      </button>
-                    </div>
+                  {!placedWithCod && orderResult.paymentStatus !== "Paid" && (
+                    <UpiPaymentBox
+                      orderId={String(orderResult.orderId)}
+                      orderNumber={String(orderResult.orderId)
+                        .slice(-6)
+                        .toUpperCase()}
+                      amountText={formatPrice(orderResult.bill?.total)}
+                      dueAt={orderResult.paymentDueAt}
+                      paymentStatus={orderResult.paymentStatus}
+                      rejectedReason=""
+                      upi={orderResult.upi}
+                      apiUrl={API_URL}
+                      onSubmitted={() =>
+                        setOrderResult((current) =>
+                          current
+                            ? { ...current, paymentStatus: "Under review" }
+                            : current
+                        )
+                      }
+                      onAuthExpired={handleAuthExpired}
+                    />
                   )}
 
                   <div className="mt-6 flex flex-col gap-3 sm:flex-row">
@@ -2265,16 +2148,14 @@ export default function App() {
                         closeCheckout();
                         handleFetchMyOrders();
                       }}
-                      disabled={paymentBusy}
-                      className="flex-1 rounded-full bg-gradient-to-r from-brand-500 to-brand-700 px-5 py-3 font-bold text-white shadow-lg shadow-brand-500/30 transition hover:opacity-95 disabled:cursor-not-allowed disabled:opacity-40"
+                      className="flex-1 rounded-full bg-gradient-to-r from-brand-500 to-brand-700 px-5 py-3 font-bold text-white shadow-lg shadow-brand-500/30 transition hover:opacity-95"
                     >
                       View my orders
                     </button>
                     <button
                       type="button"
                       onClick={closeCheckout}
-                      disabled={paymentBusy}
-                      className="flex-1 rounded-full border border-brand-100 px-5 py-3 font-semibold text-brand-700 transition hover:bg-brand-50 disabled:cursor-not-allowed disabled:opacity-40"
+                      className="flex-1 rounded-full border border-brand-100 px-5 py-3 font-semibold text-brand-700 transition hover:bg-brand-50"
                     >
                       Continue shopping
                     </button>
@@ -2382,6 +2263,29 @@ export default function App() {
                             </p>
                           </div>
                         </div>
+
+                        <label className="mt-4 block">
+                          <span className="text-sm font-semibold text-brand-900">
+                            Your phone number
+                          </span>
+                          <input
+                            type="tel"
+                            inputMode="numeric"
+                            autoComplete="tel"
+                            maxLength={10}
+                            value={contactPhone}
+                            onChange={(event) =>
+                              setContactPhone(
+                                event.target.value.replace(/\D/g, "")
+                              )
+                            }
+                            placeholder="10-digit mobile number"
+                            className="mt-1 w-full rounded-2xl border border-slate-200 px-4 py-3 text-sm outline-none transition focus:border-brand-500 focus:ring-4 focus:ring-brand-100"
+                          />
+                          <span className="mt-1 block text-xs text-slate-500">
+                            We may call you about your pickup order.
+                          </span>
+                        </label>
                       </section>
                     )}
 
@@ -2569,19 +2473,39 @@ export default function App() {
                     {/* ---------------- Payment ---------------- */}
                     <section className="rounded-3xl border border-brand-100 bg-white p-5 shadow-soft">
                       <StepTitle number="5">Payment</StepTitle>
-                      <div className="mt-3 flex items-start gap-3 rounded-2xl bg-brand-50 p-4">
-                        <span className="flex h-10 w-10 shrink-0 items-center justify-center rounded-xl bg-white text-sm font-extrabold text-brand-700 shadow-sm">
-                          UPI
-                        </span>
-                        <div>
-                          <p className="font-semibold text-brand-900">
-                            Online UPI
-                          </p>
-                          <p className="mt-0.5 text-sm text-slate-600">
-                            You pay by UPI right after you place your order.
-                            Your order is confirmed once the payment succeeds.
-                          </p>
-                        </div>
+                      <div className="mt-3 grid gap-3 sm:grid-cols-2">
+                        <FulfillmentCard
+                          active={selectedPayment === "upi_screenshot"}
+                          disabled={!upiOn}
+                          icon={Smartphone}
+                          title="Pay by UPI"
+                          text={
+                            upiOn
+                              ? "Pay in any UPI app, then upload a screenshot of the payment."
+                              : "Not available right now."
+                          }
+                          onSelect={() => setPaymentMethod("upi_screenshot")}
+                        />
+                        <FulfillmentCard
+                          active={selectedPayment === "cod"}
+                          disabled={!codOn || codTooBig}
+                          icon={Banknote}
+                          title={
+                            fulfillmentMethod === "takeaway"
+                              ? "Pay at shop"
+                              : "Pay on delivery"
+                          }
+                          text={
+                            !codOn
+                              ? "Not available right now."
+                              : codTooBig
+                                ? `Available only for orders up to ${formatPrice(codLimit)}.`
+                                : fulfillmentMethod === "takeaway"
+                                  ? "Pay cash or UPI when you collect your order."
+                                  : "Pay cash or UPI at your door."
+                          }
+                          onSelect={() => setPaymentMethod("cod")}
+                        />
                       </div>
                     </section>
 
@@ -2813,10 +2737,11 @@ export default function App() {
                     <OrderCard
                       key={order._id}
                       order={order}
-                      limitMinutes={config.unpaidOrderMinutes}
-                      paying={payingOrderId === String(order._id)}
-                      payDisabled={Boolean(payingOrderId)}
-                      onPay={() => handlePayNow(order)}
+                      upiSettings={config.paymentMethods?.upiScreenshot}
+                      onPaymentSubmitted={() =>
+                        handleFetchMyOrders({ quiet: true })
+                      }
+                      onAuthExpired={handleAuthExpired}
                     />
                   ))}
                 </div>

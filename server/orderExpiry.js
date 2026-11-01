@@ -2,39 +2,55 @@
 // orderExpiry.js
 // Cancels orders that were never paid and gives their stock and
 // time slot back, so unpaid orders cannot block other customers.
+//
+// Each order has its own deadline, "paymentDueAt". Orders whose
+// payment screenshot is waiting for the admin ("Under review")
+// and cash orders are never cancelled here.
 // ---------------------------------------------------------------
 
 const { releaseStock, releaseSlot } = require("./orderRoutes");
-
 const { UNPAID_ORDER_MINUTES } = require("./shopConfig");
-const CHECK_EVERY_MS = 60 * 1000; // look for old unpaid orders every minute
+
+const CHECK_EVERY_MS = 60 * 1000; // look for overdue orders every minute
 const BATCH_SIZE = 20; // handle at most 20 orders per check
+
+// Builds the "this order is overdue" condition.
+// Older orders have no paymentDueAt, so they use their creation time.
+function overdueCondition() {
+    const legacyCutoff = new Date(Date.now() - UNPAID_ORDER_MINUTES * 60 * 1000);
+
+    return {
+        $or: [
+            { paymentDueAt: { $lte: new Date() } },
+            { paymentDueAt: { $exists: false }, createdAt: { $lt: legacyCutoff } },
+        ],
+    };
+}
 
 async function expireUnpaidOrders(db) {
     const orders = db.collection("orders");
-    const cutoff = new Date(Date.now() - UNPAID_ORDER_MINUTES * 60 * 1000);
 
-    // Orders that are still waiting for payment and are older than the cutoff.
     const staleOrders = await orders
         .find({
             status: "Pending",
             paymentStatus: "Pending",
             stockReserved: true,
-            createdAt: { $lt: cutoff },
+            ...overdueCondition(),
         })
         .limit(BATCH_SIZE)
         .toArray();
 
     for (const order of staleOrders) {
-        // Step 1: claim the order. The filter means this works only while it
-        // is still Pending and unpaid. If a payment is confirmed at this exact
-        // moment, one side wins and the other does nothing.
+        // Step 1: claim the order. The filter repeats every condition, so if the
+        // customer uploaded a screenshot (or the admin rejected it and gave more
+        // time) a moment ago, this does nothing.
         const claimed = await orders.updateOne(
             {
                 _id: order._id,
                 status: "Pending",
                 paymentStatus: "Pending",
                 stockReserved: true,
+                ...overdueCondition(),
             },
             {
                 $set: {
