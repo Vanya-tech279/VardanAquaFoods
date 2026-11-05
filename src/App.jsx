@@ -1362,9 +1362,11 @@ export default function App() {
       <header className="ocean-header sticky top-0 z-30 border-b border-brand-100/70">
         <div className="mx-auto flex max-w-7xl flex-wrap items-center gap-x-4 gap-y-3 px-4 py-3 sm:px-6 lg:px-8">
           <a href="#home" className="flex shrink-0 items-center gap-3">
-            <span className="animate-bob flex h-11 w-11 items-center justify-center rounded-2xl bg-gradient-to-br from-brand-400 to-brand-700 text-white shadow-lg shadow-brand-500/30">
-              <Fish size={24} />
-            </span>
+            <img
+              src="/logo.png"
+              alt="VARDAN AQUA FOODS"
+              className="h-14 w-auto max-w-[190px] object-contain"
+            />
             <span className="leading-tight">
               <span className="block font-display text-base font-extrabold tracking-tight text-brand-900 sm:text-xl">
                 VARDAN AQUA FOODS
