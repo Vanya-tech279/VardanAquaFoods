@@ -40,7 +40,21 @@ const CASH_COLLECTION_STATUSES = [
 ];
 
 // An order that reached one of these can no longer be cancelled here.
+// Only these orders can be deleted.
 const FINAL_STATUSES = ["Cancelled", "Delivered", "Completed"];
+
+// Removes a private payment screenshot from Cloudinary.
+// A failure here is only logged, because the order is already handled.
+async function deleteProofImage(publicId) {
+    try {
+        await cloudinary.uploader.destroy(publicId, {
+            resource_type: "image",
+            type: "authenticated",
+        });
+    } catch (error) {
+        console.error("Could not delete payment screenshot:", error.message);
+    }
+}
 
 function createAdminOrderRoutes({ getDb, requireAdmin }) {
     const router = express.Router();
@@ -281,7 +295,7 @@ function createAdminOrderRoutes({ getDb, requireAdmin }) {
                                 paymentRejection: { reason, at: now },
                                 updatedAt: now,
                             },
-                            // Keep a record, and free the UTR number.
+                            // Keep a record of the rejected screenshot.
                             $push: {
                                 rejectedPayments: {
                                     ...order.manualPayment,
@@ -300,7 +314,7 @@ function createAdminOrderRoutes({ getDb, requireAdmin }) {
                     return res.json({
                         success: true,
                         message:
-                            "Payment rejected. The customer can upload new details until the time limit ends.",
+                            "Payment rejected. The customer can upload a new screenshot until the time limit ends.",
                     });
                 }
 
@@ -570,6 +584,89 @@ function createAdminOrderRoutes({ getDb, requireAdmin }) {
             }
         }
     );
+
+    // ADMIN: delete a finished order for good.
+    // Only Cancelled, Delivered and Completed orders can be deleted.
+    // Body: { confirmRefunded } (must be true when a refund is marked as due)
+    router.delete("/api/admin/orders/:id", requireAdmin, async (req, res) => {
+        try {
+            const { id } = req.params;
+
+            if (!OBJECT_ID_PATTERN.test(id)) {
+                return res.status(400).json({
+                    success: false,
+                    message: "Invalid order ID.",
+                });
+            }
+
+            const orders = getDb().collection("orders");
+            const order = await orders.findOne({ _id: new ObjectId(id) });
+
+            if (!order) {
+                return res.status(404).json({
+                    success: false,
+                    message: "Order not found.",
+                });
+            }
+
+            if (!FINAL_STATUSES.includes(order.status)) {
+                return res.status(409).json({
+                    success: false,
+                    message:
+                        "Only cancelled, delivered or completed orders can be deleted. Cancel an active order first.",
+                });
+            }
+
+            if (order.refundDue === true && req.body?.confirmRefunded !== true) {
+                return res.status(409).json({
+                    success: false,
+                    message:
+                        "A refund is marked as due for this order. Delete it only after you have refunded the customer.",
+                });
+            }
+
+            // The filter repeats the status we read, so this only deletes
+            // if nothing changed in the meantime. Stock is not touched here:
+            // a cancelled order already gave its stock back, and a delivered
+            // order's stock was really sold.
+            const result = await orders.deleteOne({
+                _id: order._id,
+                status: order.status,
+            });
+
+            if (result.deletedCount !== 1) {
+                return res.status(409).json({
+                    success: false,
+                    message:
+                        "This order was just changed. Please refresh the list and try again.",
+                });
+            }
+
+            // The order is gone, so remove its private screenshots too.
+            const publicIds = [
+                order.manualPayment?.proofPublicId,
+                ...(Array.isArray(order.rejectedPayments)
+                    ? order.rejectedPayments.map((payment) => payment?.proofPublicId)
+                    : []),
+            ].filter(Boolean);
+
+            for (const publicId of publicIds) {
+                await deleteProofImage(publicId);
+            }
+
+            return res.json({
+                success: true,
+                message: "Order deleted.",
+            });
+        } catch (error) {
+            console.error("Delete order failed:", error.message);
+
+            return res.status(500).json({
+                success: false,
+                message: "Unable to delete the order.",
+            });
+        }
+    });
 
     return router;
 }

@@ -13,6 +13,12 @@ const SHOP = {
     longitude: 83.17088802883556,
 };
 
+// The shop's WhatsApp number for special orders and enquiries.
+// Digits only, with the country code and no "+" or spaces.
+const WHATSAPP = {
+    number: "919381824979",
+};
+
 // Delivery rules.
 const DELIVERY = {
     maxRadiusKm: 6,
@@ -84,6 +90,7 @@ const PAYMENT = {
 
 module.exports = {
     SHOP,
+    WHATSAPP,
     DELIVERY,
     TAX_PERCENT,
     TIME_ZONE,

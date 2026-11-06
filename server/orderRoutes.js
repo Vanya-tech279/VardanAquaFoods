@@ -14,6 +14,7 @@ const {
     SLOTS,
     SLOT_CAPACITY,
     PAYMENT,
+    WHATSAPP,
 } = require("./shopConfig");
 const {
     roundMoney,
@@ -26,6 +27,28 @@ const {
 const MAX_LINE_ITEMS = 30;
 const MAX_QUANTITY_KG = 50;
 const OBJECT_ID_PATTERN = /^[a-f0-9]{24}$/i;
+
+// Pre-book and order-hours rules. Times are Indian time (IST = UTC + 5:30),
+// because the Render server runs on UTC.
+const PREBOOK_MAX_DAYS = 7;
+const ORDER_OPEN_MINUTES = 6 * 60; // 6:00 AM
+const ORDER_CLOSE_MINUTES = 20 * 60 + 30; // 8:30 PM
+const IST_OFFSET_MS = 5.5 * 60 * 60 * 1000;
+
+// Today's date in India as "YYYY-MM-DD". offsetDays = 1 gives tomorrow.
+function istDate(offsetDays = 0) {
+    const shifted = new Date(
+        Date.now() + IST_OFFSET_MS + offsetDays * 24 * 60 * 60 * 1000
+    );
+    return shifted.toISOString().slice(0, 10);
+}
+
+// True when the shop is accepting orders right now (6 AM to 8:30 PM IST).
+function withinOrderHours() {
+    const shifted = new Date(Date.now() + IST_OFFSET_MS);
+    const minutes = shifted.getUTCHours() * 60 + shifted.getUTCMinutes();
+    return minutes >= ORDER_OPEN_MINUTES && minutes <= ORDER_CLOSE_MINUTES;
+}
 
 // A small helper so every error has the same shape.
 function fail(status, message) {
@@ -145,6 +168,13 @@ async function priceItems(db, lines) {
             return { error: "A product in your cart is no longer available." };
         }
 
+        // Special-order products can only be enquired about on WhatsApp.
+        if (product.orderType === "special") {
+            return {
+                error: `${product.name} is a special-order item. Please contact us on WhatsApp to order it.`,
+            };
+        }
+
         const { legacy, variants } = getVariants(product);
         const variant = variants.find((item) => item.size === line.size);
 
@@ -158,7 +188,13 @@ async function priceItems(db, lines) {
             return { error: `${product.name} is not available right now.` };
         }
 
-        if (!variant.available || variant.stockKg < line.quantityKg) {
+        // Pre-book products are ordered ahead, so today's stock does not apply.
+        const isPrebook = product.prebook === true;
+
+        if (
+            !isPrebook &&
+            (!variant.available || variant.stockKg < line.quantityKg)
+        ) {
             return {
                 error: `Only ${Math.max(variant.stockKg, 0)} kg of ${product.name} (size ${line.size}) is available.`,
             };
@@ -174,6 +210,7 @@ async function priceItems(db, lines) {
             pricePerKg: variant.pricePerKg,
             lineTotal: roundMoney(variant.pricePerKg * line.quantityKg),
             legacyProduct: legacy,
+            prebook: isPrebook,
         });
     }
 
@@ -189,6 +226,9 @@ async function reserveStock(db, items) {
     const reserved = [];
 
     for (const item of items) {
+        // Pre-book items have no stock to take.
+        if (item.prebook) continue;
+
         const filter = item.legacyProduct
             ? { _id: item.productId, stockKg: { $gte: item.quantityKg } }
             : {
@@ -229,6 +269,9 @@ async function releaseStock(db, items) {
     const products = db.collection("products");
 
     for (const item of items) {
+        // Nothing was taken for pre-book items, so nothing is given back.
+        if (item.prebook) continue;
+
         if (item.legacyProduct) {
             await products.updateOne(
                 { _id: item.productId },
@@ -343,7 +386,7 @@ function buildPaymentFields(method) {
 // Validates everything and calculates the bill. Used by BOTH the
 // quote endpoint (live bill) and the order endpoint (real order).
 async function prepareCheckout(db, customerId, body, requireSlot) {
-    const { items, fulfillmentMethod, addressId, date, slotId } = body || {};
+    const { items, fulfillmentMethod, addressId } = body || {};
 
     if (!["takeaway", "delivery"].includes(fulfillmentMethod)) {
         return fail(400, "Please choose Takeaway or Doorstep Delivery.");
@@ -356,7 +399,6 @@ async function prepareCheckout(db, customerId, body, requireSlot) {
     // customer. Delivery orders already have one on the saved address.
     // The live bill (requireSlot = false) does not need it.
     let contactPhone = null;
-    console.log("TEMP contactPhone received:", JSON.stringify(body?.contactPhone), "| method:", fulfillmentMethod, "| requireSlot:", requireSlot);
     if (requireSlot && fulfillmentMethod === "takeaway") {
         contactPhone = String(body?.contactPhone ?? "").trim();
 
@@ -365,13 +407,8 @@ async function prepareCheckout(db, customerId, body, requireSlot) {
         }
     }
 
-    let slot = null;
-
-    if (requireSlot) {
-        const check = validateSlotChoice(date, slotId);
-        if (!check.valid) return fail(400, check.reason);
-        slot = SLOTS.find((item) => item.id === slotId);
-    }
+    // Time slots are no longer used. In-stock orders are delivered in about 1 hour.
+    const slot = null;
 
     let address = null;
     let deliveryQuote = null;
@@ -404,6 +441,40 @@ async function prepareCheckout(db, customerId, body, requireSlot) {
     const priced = await priceItems(db, cart.lines);
     if (priced.error) return fail(409, priced.error);
 
+    // Pre-book items and regular items must be ordered separately.
+    const prebookCount = priced.items.filter((item) => item.prebook).length;
+    const prebook = prebookCount > 0;
+
+    if (prebook && prebookCount !== priced.items.length) {
+        return fail(
+            409,
+            "Pre-book items must be ordered separately from regular items."
+        );
+    }
+
+    // A pre-book order needs a date: tomorrow up to 7 days from today.
+    // The live bill (requireSlot = false) does not need it.
+    let prebookDate = null;
+
+    if (prebook && requireSlot) {
+        prebookDate = String(body?.prebookDate ?? "").trim();
+
+        const looksValid =
+            /^\d{4}-\d{2}-\d{2}$/.test(prebookDate) &&
+            // rejects dates that do not exist, like 2026-11-31
+            new Date(`${prebookDate}T00:00:00Z`).toISOString().slice(0, 10) ===
+                prebookDate &&
+            prebookDate >= istDate(1) &&
+            prebookDate <= istDate(PREBOOK_MAX_DAYS);
+
+        if (!looksValid) {
+            return fail(
+                400,
+                "Please choose a pre-book date from tomorrow up to 7 days ahead."
+            );
+        }
+    }
+
     const itemSubtotal = priced.items.reduce(
         (total, item) => total + item.lineTotal,
         0
@@ -417,7 +488,9 @@ async function prepareCheckout(db, customerId, body, requireSlot) {
             items: priced.items,
             bill,
             slot,
-            date: requireSlot ? date : null,
+            date: null,
+            prebook,
+            prebookDate,
             address,
             contactPhone,
         },
@@ -457,12 +530,15 @@ function createOrderRoutes({ getDb, requireCustomer }) {
                 pinCode: SHOP.pinCode,
             },
             nextDate: getNextDayDate(),
+            prebookMinDate: istDate(1),
+            prebookMaxDate: istDate(PREBOOK_MAX_DAYS),
             slots: SLOTS,
             deliveryEnabled:
                 Number.isFinite(SHOP.latitude) &&
                 Number.isFinite(SHOP.longitude),
             maxRadiusKm: DELIVERY.maxRadiusKm,
             feeTiers: DELIVERY.feeTiers,
+            whatsappNumber: WHATSAPP.number,
             paymentMethods: {
                 upiScreenshot: {
                     enabled: Boolean(
@@ -561,11 +637,17 @@ function createOrderRoutes({ getDb, requireCustomer }) {
     // CUSTOMER: create the order.
     router.post("/api/orders", requireCustomer, async (req, res) => {
         const db = getDb();
-        let slotReserved = false;
         let stockReserved = false;
         let prepared = null;
 
         try {
+            if (!withinOrderHours()) {
+                return res.status(400).json({
+                    success: false,
+                    message: "Orders are accepted between 6:00 AM and 8:30 PM.",
+                });
+            }
+
             await ensureIndexes();
 
             const result = await prepareCheckout(
@@ -585,8 +667,6 @@ function createOrderRoutes({ getDb, requireCustomer }) {
             prepared = result.data;
             const {
                 fulfillmentMethod,
-                date,
-                slot,
                 address,
                 items,
                 bill,
@@ -607,27 +687,10 @@ function createOrderRoutes({ getDb, requireCustomer }) {
 
             const paymentFields = buildPaymentFields(choice.method);
 
-            // 1) Reserve the slot.
-            slotReserved = await reserveSlot(
-                db,
-                date,
-                slot.id,
-                fulfillmentMethod
-            );
-
-            if (!slotReserved) {
-                return res.status(409).json({
-                    success: false,
-                    message: "That time slot is full. Please choose another slot.",
-                });
-            }
-
-            // 2) Reserve the stock.
+            // 1) Reserve the stock.
             stockReserved = await reserveStock(db, items);
 
             if (!stockReserved) {
-                await releaseSlot(db, date, slot.id, fulfillmentMethod);
-                slotReserved = false;
 
                 return res.status(409).json({
                     success: false,
@@ -640,9 +703,9 @@ function createOrderRoutes({ getDb, requireCustomer }) {
             const order = {
                 customerId: req.customerId,
                 fulfillmentMethod,
-                scheduledDate: date,
                 contactPhone, // pickup phone for takeaway, null for delivery
-                slot: { id: slot.id, label: slot.label },
+                prebook: prepared.prebook,
+                prebookDate: prepared.prebookDate, // null for regular orders
 
                 pickupLocation:
                     fulfillmentMethod === "takeaway"
@@ -712,14 +775,6 @@ function createOrderRoutes({ getDb, requireCustomer }) {
             try {
                 if (stockReserved && prepared) {
                     await releaseStock(db, prepared.items);
-                }
-                if (slotReserved && prepared) {
-                    await releaseSlot(
-                        db,
-                        prepared.date,
-                        prepared.slot.id,
-                        prepared.fulfillmentMethod
-                    );
                 }
             } catch (cleanupError) {
                 console.error("Cleanup failed:", cleanupError.message);

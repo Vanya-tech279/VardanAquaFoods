@@ -131,6 +131,7 @@ export function mapOrder(order) {
         phone: address?.phone || order.contactPhone || "",
         method: order.fulfillmentMethod || "",
         scheduledDate: order.scheduledDate || "",
+        prebookDate: order.prebookDate || "",
         slotLabel: order.slot?.label || "",
         address,
         pickup: order.pickupLocation || null,

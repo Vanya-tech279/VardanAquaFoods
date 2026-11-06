@@ -13,10 +13,12 @@ import {
     X,
     MapPin,
     PackageCheck,
+    Trash2,
 } from "lucide-react";
 import {
     ORDER_STATUSES,
     PROGRESS,
+    FINAL_STATUSES,
     statusStyles,
     nextStatusFor,
     formatPrice,
@@ -96,6 +98,25 @@ function PaymentPill({ payment }) {
     );
 }
 
+// What to show as the delivery / pickup time of an order.
+function scheduleText(order) {
+    if (order.prebookDate) {
+        return `Pre-book: ${formatScheduleDate(order.prebookDate)}`;
+    }
+
+    if (order.scheduledDate) {
+        return `${formatScheduleDate(order.scheduledDate)}${order.slotLabel ? `, ${order.slotLabel}` : ""
+            }`;
+    }
+
+    return "About 1 hour";
+}
+
+// Only finished orders can be deleted. Active orders must be cancelled first.
+function canDelete(order) {
+    return FINAL_STATUSES.includes(order.status);
+}
+
 export default function OrdersPanel({
     orders,
     loading,
@@ -105,6 +126,7 @@ export default function OrdersPanel({
     onLoadProof,
     onPaymentAction,
     onCancelOrder,
+    onDeleteOrder,
     mode = "orders",
     onViewAll,
 }) {
@@ -112,6 +134,7 @@ export default function OrdersPanel({
     const [activeFilter, setActiveFilter] = useState("All");
     const [selectedId, setSelectedId] = useState("");
     const [updatingId, setUpdatingId] = useState("");
+    const [deletingId, setDeletingId] = useState("");
     const [actionError, setActionError] = useState("");
 
     const isOverview = mode === "overview";
@@ -135,7 +158,8 @@ export default function OrdersPanel({
 
         return {
             total: orders.length,
-            toReview: orders.filter((o) => o.payment === "Under review").length, toFulfil: orders.filter((o) => toFulfil.includes(o.status)).length,
+            toReview: orders.filter((o) => o.payment === "Under review").length,
+            toFulfil: orders.filter((o) => toFulfil.includes(o.status)).length,
             paidValue: orders
                 .filter((o) => o.payment === "Paid" && o.status !== "Cancelled")
                 .reduce((sum, o) => sum + o.amount, 0),
@@ -179,6 +203,35 @@ export default function OrdersPanel({
 
         setUpdatingId("");
         if (!result.ok) setActionError(result.message);
+    }
+
+    // Asks for confirmation, then deletes a finished order for good.
+    async function removeOrder(order) {
+        if (deletingId || !onDeleteOrder) return;
+
+        const refundWarning = order.refundDue
+            ? "\n\nA refund is marked as due for this order. Delete it only if you have already refunded the customer."
+            : "";
+
+        const confirmed = window.confirm(
+            `Delete order #${order.shortId} permanently? This cannot be undone.${refundWarning}`
+        );
+
+        if (!confirmed) return;
+
+        setDeletingId(order.id);
+        setActionError("");
+
+        const result = await onDeleteOrder(order.id, order.refundDue);
+
+        setDeletingId("");
+
+        if (!result.ok) {
+            setActionError(result.message);
+            return;
+        }
+
+        closeModal();
     }
 
     function closeModal() {
@@ -227,13 +280,6 @@ export default function OrdersPanel({
                 </div>
 
                 <div className="grid gap-4 sm:grid-cols-2 xl:grid-cols-4">
-                    <StatCard
-                        label="Total orders"
-                        value={stats.total}
-                        note="All orders so far"
-                        icon={ShoppingCart}
-                        color="blue"
-                    />
                     <StatCard
                         label="Total orders"
                         value={stats.total}
@@ -314,19 +360,20 @@ export default function OrdersPanel({
                         </div>
 
                         <div className="flex flex-wrap gap-2">
-                            {["All", "Under review", ...ORDER_STATUSES].map((filter) => (<button
-                                key={filter}
-                                onClick={() => setActiveFilter(filter)}
-                                className={`rounded-full px-3.5 py-2 text-xs font-bold transition ${activeFilter === filter
-                                    ? "bg-brand-600 text-white shadow-md shadow-brand-500/30"
-                                    : "bg-slate-100 text-slate-500 hover:bg-brand-50 hover:text-brand-700"
-                                    }`}
-                            >
-                                {filter}
-                                <span className="ml-1.5 opacity-70">
-                                    {counts[filter] ?? 0}
-                                </span>
-                            </button>
+                            {["All", "Under review", ...ORDER_STATUSES].map((filter) => (
+                                <button
+                                    key={filter}
+                                    onClick={() => setActiveFilter(filter)}
+                                    className={`rounded-full px-3.5 py-2 text-xs font-bold transition ${activeFilter === filter
+                                        ? "bg-brand-600 text-white shadow-md shadow-brand-500/30"
+                                        : "bg-slate-100 text-slate-500 hover:bg-brand-50 hover:text-brand-700"
+                                        }`}
+                                >
+                                    {filter}
+                                    <span className="ml-1.5 opacity-70">
+                                        {counts[filter] ?? 0}
+                                    </span>
+                                </button>
                             ))}
                         </div>
                     </div>
@@ -424,9 +471,13 @@ export default function OrdersPanel({
                                                     ? "Takeaway"
                                                     : "Delivery"}
                                             </p>
-                                            <p className="mt-1 whitespace-nowrap text-xs text-slate-400">
-                                                {formatScheduleDate(order.scheduledDate)}
-                                                {order.slotLabel ? `, ${order.slotLabel}` : ""}
+                                            <p
+                                                className={`mt-1 whitespace-nowrap text-xs ${order.prebookDate
+                                                    ? "font-semibold text-amber-700"
+                                                    : "text-slate-400"
+                                                    }`}
+                                            >
+                                                {scheduleText(order)}
                                             </p>
                                         </td>
                                         <td className="px-6 py-5 text-sm font-extrabold text-brand-900">
@@ -441,6 +492,17 @@ export default function OrdersPanel({
                                         <td className="px-6 py-5">
                                             <div className="flex items-center gap-2">
                                                 {renderAction(order)}
+                                                {canDelete(order) && (
+                                                    <button
+                                                        aria-label={`Delete order ${order.shortId}`}
+                                                        title="Delete order"
+                                                        onClick={() => removeOrder(order)}
+                                                        disabled={Boolean(deletingId)}
+                                                        className="rounded-full border border-red-100 p-2 text-red-500 transition hover:border-red-300 hover:bg-red-50 disabled:cursor-not-allowed disabled:opacity-50"
+                                                    >
+                                                        <Trash2 size={16} />
+                                                    </button>
+                                                )}
                                                 <button
                                                     aria-label={`View order ${order.shortId}`}
                                                     onClick={() => {
@@ -553,8 +615,7 @@ export default function OrdersPanel({
                             />
                             <DetailRow
                                 label="Scheduled for"
-                                value={`${formatScheduleDate(selected.scheduledDate)}${selected.slotLabel ? `, ${selected.slotLabel}` : ""
-                                    }`}
+                                value={scheduleText(selected)}
                             />
                         </div>
 
@@ -665,6 +726,38 @@ export default function OrdersPanel({
                         {actionError && (
                             <p className="mt-4 rounded-2xl bg-red-50 p-3 text-sm text-red-700">
                                 {actionError}
+                            </p>
+                        )}
+
+                        {canDelete(selected) ? (
+                            <div className="mt-6 flex flex-col gap-3 rounded-3xl border border-red-100 bg-red-50/60 p-5 sm:flex-row sm:items-center sm:justify-between">
+                                <div>
+                                    <p className="font-display font-bold text-red-700">
+                                        Delete this order
+                                    </p>
+                                    <p className="mt-1 text-xs leading-5 text-red-600">
+                                        This removes the order and its payment
+                                        screenshot for good. It cannot be undone.
+                                        {selected.refundDue
+                                            ? " A refund is marked as due, so delete it only after you have refunded the customer."
+                                            : ""}
+                                    </p>
+                                </div>
+                                <button
+                                    onClick={() => removeOrder(selected)}
+                                    disabled={Boolean(deletingId)}
+                                    className="flex shrink-0 items-center justify-center gap-2 rounded-full bg-red-600 px-5 py-2.5 text-sm font-bold text-white shadow-md transition hover:bg-red-700 active:scale-95 disabled:cursor-not-allowed disabled:opacity-50"
+                                >
+                                    <Trash2 size={15} />
+                                    {deletingId === selected.id
+                                        ? "Deleting..."
+                                        : "Delete order"}
+                                </button>
+                            </div>
+                        ) : (
+                            <p className="mt-4 text-xs text-slate-400">
+                                Only cancelled, delivered or completed orders can
+                                be deleted. Cancel an active order first.
                             </p>
                         )}
 

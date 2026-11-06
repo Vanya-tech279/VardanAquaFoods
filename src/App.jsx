@@ -18,12 +18,12 @@ import {
   MapPin,
   Clock,
   Store,
-  CalendarDays,
   ChevronDown,
   CheckCircle2,
   XCircle,
   Smartphone,
   Banknote,
+  MessageCircle,
 } from "lucide-react";
 
 /* ------------------------------------------------------------------
@@ -34,8 +34,11 @@ import {
 const API_URL = import.meta.env.VITE_API_URL || "http://localhost:5000";
 
 
-// Seafood is sold in steps of this many kg (the backend accepts 0.5 kg steps).
+// Seafood is sold in steps of this many kg (whole kilograms only).
 const STEP_KG = 1;
+
+// The most kilograms of one item in a single order (same limit as the server).
+const MAX_ORDER_KG = 50;
 
 const categories = [
   "All",
@@ -77,15 +80,8 @@ const FALLBACK_CONFIG = {
     address: "RH Colony, Seven Temples Road",
     pinCode: "530046",
   },
-  nextDate: "",
-  slots: [
-    { id: "0630-0730", label: "6:30 AM–7:30 AM" },
-    { id: "0730-0830", label: "7:30 AM–8:30 AM" },
-    { id: "0830-0930", label: "8:30 AM–9:30 AM" },
-    { id: "0930-1030", label: "9:30 AM–10:30 AM" },
-    { id: "1030-1130", label: "10:30 AM–11:30 AM" },
-  ],
   deliveryEnabled: true,
+  whatsappNumber: "",
   paymentMethods: {
     upiScreenshot: { enabled: false, upiId: "", payeeName: "" },
     cod: { enabled: false, maxOrderTotal: 0 },
@@ -132,12 +128,24 @@ function formatKg(value) {
   return Number.isInteger(number) ? String(number) : number.toFixed(1);
 }
 
-// Tomorrow's date (YYYY-MM-DD) in Indian time, same rule as the backend.
-function getTomorrowIST() {
-  const tomorrow = new Date(Date.now() + 24 * 60 * 60 * 1000);
-  return new Intl.DateTimeFormat("en-CA", { timeZone: "Asia/Kolkata" }).format(
-    tomorrow
-  );
+// WhatsApp link with the product name already typed in the message.
+// Returns "" when the shop number has not loaded yet.
+function whatsappLink(number, productName) {
+  if (!number) return "";
+
+  const message = `Hello VARDAN AQUA FOODS, I would like to enquire about ordering ${productName}. Please let me know its availability and advance-order requirements.`;
+
+  return `https://wa.me/${number}?text=${encodeURIComponent(message)}`;
+}
+
+// General WhatsApp link for special orders that are not tied to one product.
+function generalWhatsappLink(number) {
+  if (!number) return "";
+
+  const message =
+    "Hello VARDAN AQUA FOODS, I would like to place a special order. Please let me know the availability and advance-order requirements.";
+
+  return `https://wa.me/${number}?text=${encodeURIComponent(message)}`;
 }
 
 // "2026-10-27" -> "Tue, 27 Oct"
@@ -153,6 +161,23 @@ function formatScheduleDate(dateString) {
     day: "numeric",
     month: "short",
   }).format(date);
+}
+
+// Builds the list of pre-book dates from the first and last date the server
+// sent, for example ["2026-11-06", ..., "2026-11-12"].
+function buildDateOptions(minDate, maxDate) {
+  if (!minDate || !maxDate) return [];
+
+  const dates = [];
+  const current = new Date(`${minDate}T00:00:00Z`);
+  const last = new Date(`${maxDate}T00:00:00Z`);
+
+  while (current <= last && dates.length < 14) {
+    dates.push(current.toISOString().slice(0, 10));
+    current.setUTCDate(current.getUTCDate() + 1);
+  }
+
+  return dates;
 }
 
 // Makes sure every cart quantity is a whole number of kg, at least 1.
@@ -212,6 +237,8 @@ function formatBackendProduct(product) {
     category: product.category || "",
     image: product.imageUrl || "",
     tag: product.tag || "",
+    orderType: product.orderType === "special" ? "special" : "regular",
+    prebook: product.prebook === true,
     variants,
   };
 }
@@ -289,13 +316,28 @@ function QuantityStepper({ quantity, onMinus, onPlus, plusDisabled, name }) {
   );
 }
 
-function ProductCard({ product, size, quantity, onSelectSize, onChange }) {
+function ProductCard({
+  product,
+  size,
+  quantity,
+  onSelectSize,
+  onChange,
+  whatsappNumber,
+}) {
   const variant =
     product.variants.find((item) => item.size === size) || product.variants[0];
-  const soldOut = !variant.available || variant.stockKg <= 0;
-  const maxed = quantity + STEP_KG > variant.stockKg;
-  const lowStock = !soldOut && variant.stockKg <= 5;
-
+  // Pre-book products are ordered ahead, so today's stock does not matter.
+  // (A special product is still WhatsApp-only, so it is never pre-book.)
+  const prebook = product.prebook === true && product.orderType !== "special";
+  const soldOut = !prebook && (!variant.available || variant.stockKg <= 0);
+  const maxed = prebook
+    ? quantity + STEP_KG > MAX_ORDER_KG
+    : quantity + STEP_KG > variant.stockKg;
+  const lowStock = !soldOut && !prebook && variant.stockKg <= 5;
+  // Special products and sold-out products are enquiry-only (no cart).
+  const special = product.orderType === "special";
+  const showEnquiry = special || soldOut;
+  const enquiryLink = whatsappLink(whatsappNumber, product.name);
   return (
     <article className="group flex flex-col overflow-hidden rounded-3xl border border-brand-100 bg-white shadow-soft transition duration-300 hover:-translate-y-1 hover:border-brand-300 hover:shadow-lift">
       <div className="relative h-52 overflow-hidden bg-gradient-to-br from-brand-50 to-brand-100">
@@ -323,6 +365,12 @@ function ProductCard({ product, size, quantity, onSelectSize, onChange }) {
             Only {formatKg(variant.stockKg)} kg left
           </span>
         ) : null}
+
+        {prebook && (
+          <span className="absolute right-3 top-3 rounded-full bg-amber-300 px-3 py-1 text-xs font-bold text-amber-950 shadow">
+            Pre-book
+          </span>
+        )}
 
         <p className="absolute bottom-3 left-4 font-display text-2xl font-extrabold text-white">
           {formatPrice(variant.pricePerKg)}
@@ -358,7 +406,9 @@ function ProductCard({ product, size, quantity, onSelectSize, onChange }) {
             ? "Out of stock"
             : lowStock
               ? `Only ${formatKg(variant.stockKg)} kg left`
-              : `${formatKg(variant.stockKg)} kg available`}
+              : prebook
+                ? "Pre-book: choose your date at checkout"
+                : `${formatKg(variant.stockKg)} kg available`}
         </p>
 
         <div className="mt-auto flex items-center gap-2 pt-4">
@@ -384,7 +434,21 @@ function ProductCard({ product, size, quantity, onSelectSize, onChange }) {
             })}
           </div>
 
-          {quantity > 0 ? (
+          {showEnquiry ? (
+            <div className="text-right">
+              <a
+                href={enquiryLink || undefined}
+                target="_blank"
+                rel="noreferrer"
+                className="inline-flex h-10 items-center rounded-full bg-emerald-600 px-4 text-xs font-bold text-white shadow-md transition hover:bg-emerald-700 active:scale-95"
+              >
+                Contact for Special Order
+              </a>
+              <p className="mt-1 text-[11px] text-slate-500">
+                Needs about 1–2 days' notice
+              </p>
+            </div>
+          ) : quantity > 0 ? (
             <QuantityStepper
               quantity={quantity}
               name={`${product.name} size ${variant.size}`}
@@ -457,6 +521,7 @@ function FulfillmentCard({ active, disabled, icon: Icon, title, text, onSelect }
     </button>
   );
 }
+
 const STATUS_STYLES = {
   Pending: "bg-amber-50 text-amber-700 ring-amber-200",
   Confirmed: "bg-brand-50 text-brand-700 ring-brand-200",
@@ -528,8 +593,13 @@ function OrderCard({ order, upiSettings, onPaymentSubmitted, onAuthExpired }) {
               {method === "takeaway" ? "Takeaway from shop" : "Doorstep delivery"}
             </p>
             <p className="mt-0.5 text-brand-700">
-              {formatScheduleDate(order.scheduledDate)}
-              {order.slot?.label ? `, ${order.slot.label}` : ""}
+              {order.prebookDate
+                ? `${method === "takeaway" ? "Ready for pickup" : "Delivery"} on ${formatScheduleDate(order.prebookDate)}`
+                : order.scheduledDate
+                  ? `${formatScheduleDate(order.scheduledDate)}${order.slot?.label ? `, ${order.slot.label}` : ""}`
+                  : method === "takeaway"
+                    ? "Ready in about 1 hour"
+                    : "Delivered in about 1 hour"}
             </p>
           </div>
         </div>
@@ -584,6 +654,7 @@ function OrderCard({ order, upiSettings, onPaymentSubmitted, onAuthExpired }) {
     </div>
   );
 }
+
 /* ------------------------------------------------------------------
    MAIN APP
 ------------------------------------------------------------------ */
@@ -645,11 +716,6 @@ export default function App() {
   // ----- checkout -----
   const [checkoutOpen, setCheckoutOpen] = useState(false);
   const [fulfillmentMethod, setFulfillmentMethod] = useState("delivery");
-  const [slotData, setSlotData] = useState({ date: "", slots: [] });
-  const [slotsLoading, setSlotsLoading] = useState(false);
-  const [slotsError, setSlotsError] = useState("");
-  const [slotsReload, setSlotsReload] = useState(0);
-  const [selectedSlotId, setSelectedSlotId] = useState("");
   const [quote, setQuote] = useState(null);
   const [quoteLoading, setQuoteLoading] = useState(false);
   const [quoteError, setQuoteError] = useState("");
@@ -662,6 +728,9 @@ export default function App() {
   const [paymentMethod, setPaymentMethod] = useState("upi_screenshot");
   // Phone number for takeaway orders (digits only).
   const [contactPhone, setContactPhone] = useState("");
+  // The date chosen for a pre-book order, like "2026-11-08".
+  const [prebookDate, setPrebookDate] = useState("");
+
   /* ----------------------------- derived data ----------------------------- */
 
   const displayProducts = backendProducts;
@@ -697,7 +766,14 @@ export default function App() {
         ...product,
         cartKey: key,
         size,
-        variant: product.variants.find((item) => item.size === size),
+        // Pre-book items ignore today's stock, so they get an "always in
+        // stock" size, up to the 50 kg order limit.
+        variant: (() => {
+          const found = product.variants.find((item) => item.size === size);
+          return found && product.prebook
+            ? { ...found, available: true, stockKg: MAX_ORDER_KG }
+            : found;
+        })(),
         quantity: Number(quantity),
       });
     }
@@ -730,9 +806,16 @@ export default function App() {
     }))
   );
 
-  const tomorrowDate = config.nextDate || getTomorrowIST();
-  const slotStart = config.slots[0]?.label.split("–")[0];
-  const slotEnd = config.slots[config.slots.length - 1]?.label.split("–")[1];
+  const generalEnquiryLink = generalWhatsappLink(config.whatsappNumber);
+
+  // A cart made only of pre-book items is a pre-book order and needs a date.
+  const cartIsPrebook =
+    cartItems.length > 0 && cartItems.every((item) => item.prebook === true);
+  const prebookDates = buildDateOptions(
+    config.prebookMinDate,
+    config.prebookMaxDate
+  );
+
   const lowestDeliveryFee = Math.min(
     ...config.feeTiers.map((tier) => tier.fee)
   );
@@ -740,8 +823,6 @@ export default function App() {
   const selectedAddress = savedAddresses.find(
     (address) => address._id === selectedAddressId
   );
-  const selectedSlot = slotData.slots.find((slot) => slot.id === selectedSlotId);
-
   // Payment options come from the backend settings.
   const upiOn = Boolean(config.paymentMethods?.upiScreenshot?.enabled);
   const codOn = Boolean(config.paymentMethods?.cod?.enabled);
@@ -764,6 +845,14 @@ export default function App() {
   let blockReason = "";
   if (hasOutOfStockItems) {
     blockReason = "Remove out-of-stock items from your cart.";
+  } else if (
+    cartItems.some((item) => item.prebook === true) &&
+    !cartIsPrebook
+  ) {
+    blockReason =
+      "Pre-book items must be ordered separately from regular items.";
+  } else if (cartIsPrebook && !prebookDates.includes(prebookDate)) {
+    blockReason = "Choose a pre-book date.";
   } else if (fulfillmentMethod === "delivery" && !selectedAddressId) {
     blockReason = "Select a delivery address.";
   } else if (
@@ -771,8 +860,6 @@ export default function App() {
     !/^\d{10}$/.test(contactPhone)
   ) {
     blockReason = "Enter a 10-digit phone number for pickup.";
-  } else if (!selectedSlotId) {
-    blockReason = "Choose a time slot.";
   } else if (!selectedPayment) {
     blockReason = "Choose how you want to pay.";
   } else if (quoteError) {
@@ -796,7 +883,7 @@ export default function App() {
     return () => clearTimeout(timer);
   }, [toast]);
 
-  // Shop address, slots and delivery rules.
+  // Shop address, payment options, delivery rules and pre-book dates.
   useEffect(() => {
     apiRequest("/api/checkout/config")
       .then(({ ok, data }) => {
@@ -844,42 +931,6 @@ export default function App() {
     };
   }, [productsReload]);
 
-  // Time slots for the chosen fulfilment method.
-  useEffect(() => {
-    if (!checkoutOpen || orderResult) return;
-
-    let ignore = false;
-    setSlotsLoading(true);
-    setSlotsError("");
-
-    apiRequest(`/api/checkout/slots?method=${fulfillmentMethod}`)
-      .then(({ ok, data }) => {
-        if (ignore) return;
-        if (!ok || !data.success) {
-          throw new Error(data.message || "Unable to load time slots.");
-        }
-
-        setSlotData({ date: data.date, slots: data.slots });
-        setSelectedSlotId((current) =>
-          data.slots.some((slot) => slot.id === current && slot.available)
-            ? current
-            : ""
-        );
-      })
-      .catch((error) => {
-        if (!ignore) {
-          setSlotData({ date: "", slots: [] });
-          setSlotsError(error.message || "Unable to load time slots.");
-        }
-      })
-      .finally(() => {
-        if (!ignore) setSlotsLoading(false);
-      });
-
-    return () => {
-      ignore = true;
-    };
-  }, [checkoutOpen, orderResult, fulfillmentMethod, slotsReload]);
 
   // Live bill from the backend. Runs again whenever anything that changes the price changes.
   useEffect(() => {
@@ -980,15 +1031,47 @@ export default function App() {
     const variant = product.variants.find((item) => item.size === selectedSize);
     if (!variant) return;
 
+    // Special products can never go into the cart.
+    if (product.orderType === "special") {
+      showToast(`${product.name} is a special order. Please contact us on WhatsApp.`);
+      return;
+    }
+
     const cartKey = `${id}__${selectedSize}`;
     const nextQuantity = Math.round(((cart[cartKey] || 0) + change) * 100) / 100;
 
-    if (change > 0 && (!variant.available || variant.stockKg <= 0)) {
+    const isPrebook = product.prebook === true;
+
+    // Pre-book items and regular items must be ordered separately.
+    if (change > 0) {
+      const mixing = Object.keys(cart).some((key) => {
+        const other = displayProducts.find(
+          (item) => item.id === key.split("__")[0]
+        );
+        return other && (other.prebook === true) !== isPrebook;
+      });
+
+      if (mixing) {
+        showToast(
+          isPrebook
+            ? "Your cart has regular items. Please order pre-book items separately."
+            : "Your cart has pre-book items. Please order regular items separately."
+        );
+        return;
+      }
+    }
+
+    if (change > 0 && !isPrebook && (!variant.available || variant.stockKg <= 0)) {
       showToast(`Size ${selectedSize} of ${product.name} is out of stock.`);
       return;
     }
 
-    if (change > 0 && nextQuantity > variant.stockKg) {
+    if (change > 0 && isPrebook && nextQuantity > MAX_ORDER_KG) {
+      showToast(`You can order up to ${MAX_ORDER_KG} kg of one item.`);
+      return;
+    }
+
+    if (change > 0 && !isPrebook && nextQuantity > variant.stockKg) {
       showToast(
         `Only ${formatKg(variant.stockKg)} kg of ${product.name} (size ${selectedSize}) is available.`
       );
@@ -1211,7 +1294,6 @@ export default function App() {
     setOrderError("");
     setQuote(null);
     setQuoteError("");
-    setSelectedSlotId("");
     setBillOpen(false);
     setCheckoutOpen(true);
 
@@ -1228,11 +1310,11 @@ export default function App() {
     if (method === fulfillmentMethod) return;
 
     setFulfillmentMethod(method);
-    setSelectedSlotId("");
     setQuote(null);
     setQuoteError("");
     setOrderError("");
   }
+
   async function handlePlaceOrder() {
     if (placingOrder || blockReason) return;
 
@@ -1248,11 +1330,10 @@ export default function App() {
           fulfillmentMethod,
           addressId:
             fulfillmentMethod === "delivery" ? selectedAddressId : undefined,
-          date: slotData.date,
-          slotId: selectedSlotId,
           paymentMethod: selectedPayment,
           contactPhone:
             fulfillmentMethod === "takeaway" ? contactPhone : undefined,
+          prebookDate: cartIsPrebook ? prebookDate : undefined,
         },
       });
 
@@ -1262,10 +1343,8 @@ export default function App() {
       }
 
       if (!ok || !data.success) {
-        // Slot full or stock changed: refresh both so the screen is correct.
+        // Stock changed: refresh the bill so the screen is correct.
         if (status === 409) {
-          setSelectedSlotId("");
-          setSlotsReload((count) => count + 1);
           setQuoteReload((count) => count + 1);
         }
         throw new Error(data.message || "Unable to place your order.");
@@ -1275,13 +1354,12 @@ export default function App() {
         orderId: data.orderId,
         bill: data.bill,
         method: fulfillmentMethod,
-        date: slotData.date,
-        slotLabel: selectedSlot?.label || "",
         address: fulfillmentMethod === "delivery" ? selectedAddress : null,
         paymentMethod: data.payment?.method || selectedPayment,
         paymentStatus: data.payment?.status || "Pending",
         paymentDueAt: data.payment?.dueAt || null,
         upi: data.payment?.upi || null,
+        prebookDate: cartIsPrebook ? prebookDate : null,
       });
 
       // The order is saved, so empty the cart.
@@ -1342,15 +1420,13 @@ export default function App() {
       <div className="bg-brand-900 text-white">
         <div className="mx-auto flex max-w-7xl flex-wrap items-center justify-center gap-x-6 gap-y-1 px-4 py-2 text-xs font-medium sm:px-6 lg:px-8">
           <span className="inline-flex items-center gap-1.5">
-            <CalendarDays size={14} className="text-amber-300" />
-            Pre-order today, get it {formatScheduleDate(tomorrowDate)}
+            <Clock size={14} className="text-amber-300" />
+            In-stock orders delivered in about 1 hour
           </span>
-          {slotStart && slotEnd && (
-            <span className="hidden items-center gap-1.5 sm:inline-flex">
-              <Clock size={14} className="text-brand-300" />
-              {slotStart} to {slotEnd}
-            </span>
-          )}
+          <span className="hidden items-center gap-1.5 sm:inline-flex">
+            <MessageCircle size={14} className="text-brand-300" />
+            Special orders: 1–2 days' notice on WhatsApp
+          </span>
           <span className="hidden items-center gap-1.5 md:inline-flex">
             <Truck size={14} className="text-brand-300" />
             Delivery within {config.maxRadiusKm} km
@@ -1521,19 +1597,20 @@ export default function App() {
 
             <div className="animate-fadeUp relative z-10 max-w-2xl p-7 sm:p-12 lg:p-16">
               <span className="inline-flex items-center gap-2 rounded-full bg-amber-300 px-4 py-1.5 text-sm font-bold text-amber-950 shadow-md">
-                <CalendarDays size={16} />
-                Delivering tomorrow, {formatScheduleDate(tomorrowDate)}
+                <Clock size={16} />
+                In-stock orders delivered in about 1 hour
               </span>
 
               <h1 className="mt-5 font-display text-4xl font-extrabold leading-[1.08] tracking-tight sm:text-6xl">
-                Pre-order today,
+                Fresh seafood,
                 <br />
-                <span className="text-amber-200">fresh seafood</span> tomorrow.
+                <span className="text-amber-200">delivered in about an hour.</span>
               </h1>
 
               <p className="mt-4 max-w-lg text-base leading-7 text-white/90 sm:text-lg">
-                Choose your catch now and pick a morning slot for tomorrow. We
-                bring it to your doorstep, or you can collect it from our shop.
+                Order what is in stock and we bring it to your doorstep in about
+                an hour, or you can collect it from our shop. For special
+                meats and fish not in stock, order on WhatsApp.
               </p>
 
               <div className="mt-8 flex flex-wrap items-center gap-x-5 gap-y-4">
@@ -1541,13 +1618,18 @@ export default function App() {
                   href="#products"
                   className="btn-sheen inline-flex items-center gap-2 rounded-full bg-white px-7 py-3.5 text-sm font-bold text-brand-700 shadow-xl shadow-brand-900/20 transition hover:scale-105 active:scale-95"
                 >
-                  Pre-order now <ArrowRight size={18} />
+                  Order now <ArrowRight size={18} />
                 </a>
-                {slotStart && slotEnd && (
-                  <span className="inline-flex items-center gap-2 text-sm font-medium text-white/90">
-                    <Clock size={16} />
-                    Morning slots, {slotStart} to {slotEnd}
-                  </span>
+                {generalEnquiryLink && (
+                  <a
+                    href={generalEnquiryLink}
+                    target="_blank"
+                    rel="noreferrer"
+                    className="inline-flex items-center gap-2 text-sm font-semibold text-white underline-offset-4 hover:underline"
+                  >
+                    <MessageCircle size={16} />
+                    Special order? Chat on WhatsApp
+                  </a>
                 )}
               </div>
 
@@ -1600,26 +1682,24 @@ export default function App() {
             </div>
 
             {/* Floating info card (desktop only) */}
-            {slotStart && slotEnd && (
-              <div className="absolute bottom-10 right-8 z-20 hidden w-64 rounded-2xl bg-white/95 p-5 text-slate-900 shadow-lift backdrop-blur lg:block">
-                <p className="text-xs font-bold uppercase tracking-wider text-brand-600">
-                  Tomorrow's slots
-                </p>
-                <p className="mt-2 font-display text-lg font-bold text-brand-900">
-                  {slotStart} to {slotEnd}
-                </p>
-                <p className="mt-1 text-sm text-slate-500">
-                  {formatScheduleDate(tomorrowDate)}, {config.slots.length}{" "}
-                  time slots
-                </p>
-                <p className="mt-3 flex items-center gap-1.5 text-xs font-medium text-slate-500">
-                  <MapPin size={13} className="text-brand-500" />
-                  Delivery within {config.maxRadiusKm} km
-                </p>
-              </div>
-            )}
+            <div className="absolute bottom-10 right-8 z-20 hidden w-64 rounded-2xl bg-white/95 p-5 text-slate-900 shadow-lift backdrop-blur lg:block">
+              <p className="text-xs font-bold uppercase tracking-wider text-brand-600">
+                In-stock orders
+              </p>
+              <p className="mt-2 font-display text-lg font-bold text-brand-900">
+                Delivered in about 1 hour
+              </p>
+              <p className="mt-1 text-sm text-slate-500">
+                Special orders need 1–2 days' notice on WhatsApp.
+              </p>
+              <p className="mt-3 flex items-center gap-1.5 text-xs font-medium text-slate-500">
+                <MapPin size={13} className="text-brand-500" />
+                Delivery within {config.maxRadiusKm} km
+              </p>
+            </div>
           </div>
         </section>
+
         {/* ----------------------------- Categories ----------------------------- */}
         <section className="mx-auto max-w-7xl px-4 pt-10 sm:px-6 lg:px-8">
           <p className="text-xs font-bold uppercase tracking-[0.18em] text-brand-600">
@@ -1628,6 +1708,23 @@ export default function App() {
           <h2 className="mt-1 font-display text-2xl font-extrabold tracking-tight text-brand-900 sm:text-3xl">
             Explore the catch
           </h2>
+
+          <div className="mt-4 flex flex-col gap-3 rounded-3xl border border-emerald-200 bg-emerald-50 p-4 sm:flex-row sm:items-center sm:justify-between">
+            <p className="text-sm leading-6 text-emerald-900">
+              <span className="font-bold">Looking for something special?</span>{" "}
+              Natu kodi, Kadaknath, turkey and fish that are out of stock can be
+              arranged with 1–2 days' notice.
+            </p>
+            <a
+              href={generalEnquiryLink || undefined}
+              target="_blank"
+              rel="noreferrer"
+              className="inline-flex shrink-0 items-center justify-center gap-2 rounded-full bg-emerald-600 px-5 py-2.5 text-sm font-bold text-white shadow-md transition hover:bg-emerald-700 active:scale-95"
+            >
+              <MessageCircle size={16} />
+              Contact for Special Order
+            </a>
+          </div>
 
           <div className="no-scrollbar -mx-4 mt-5 flex gap-3 overflow-x-auto px-4 pb-3">
             {categories.map((item) => {
@@ -1653,6 +1750,7 @@ export default function App() {
             })}
           </div>
         </section>
+
         {/* ------------------------------ Products ------------------------------ */}
         <section
           id="products"
@@ -1667,7 +1765,7 @@ export default function App() {
                 {search.trim()
                   ? `Results for "${search.trim()}"`
                   : category === "All"
-                    ? "Pre-order for tomorrow"
+                    ? "Available now"
                     : category}
                 <span className="rounded-full bg-brand-50 px-3 py-1 text-sm font-semibold text-brand-700">
                   {visibleProducts.length}{" "}
@@ -1737,6 +1835,7 @@ export default function App() {
                     <ProductCard
                       key={product.id}
                       product={product}
+                      whatsappNumber={config.whatsappNumber}
                       size={size}
                       quantity={cart[`${product.id}__${size}`] || 0}
                       onSelectSize={(newSize) =>
@@ -1778,28 +1877,28 @@ export default function App() {
           )}
         </section>
 
-        {/* --------------------------- How pre-ordering works --------------------------- */}
+        {/* --------------------------- How ordering works --------------------------- */}
         <section className="mx-auto max-w-7xl px-4 pb-16 pt-2 sm:px-6 lg:px-8">
           <p className="text-xs font-bold uppercase tracking-[0.18em] text-brand-600">
             Simple as 1, 2, 3
           </p>
           <h2 className="mt-1 font-display text-2xl font-extrabold tracking-tight text-brand-900 sm:text-3xl">
-            How pre-ordering works
+            How ordering seafood works
           </h2>
 
           <ol className="mt-6 grid gap-4 sm:grid-cols-3">
             {[
               [
-                "Order today",
-                "Add your seafood to the cart and choose delivery or takeaway.",
+                "Choose in-stock seafood",
+                "Add available items to your cart and choose delivery or takeaway.",
               ],
               [
-                "Pick tomorrow's slot",
-                `Choose a morning time between ${slotStart || "6:30 AM"} and ${slotEnd || "11:30 AM"}.`,
+                "Pay and confirm",
+                "Pay by UPI and upload a screenshot, or choose cash on delivery or at the shop.",
               ],
               [
-                "Get it fresh",
-                `Delivered to your door within ${config.maxRadiusKm} km, or ready for pickup at our shop.`,
+                "Get it in about 1 hour",
+                `Delivered within ${config.maxRadiusKm} km, or ready for pickup at our shop.`,
               ],
             ].map(([title, text], index) => (
               <li
@@ -1825,6 +1924,7 @@ export default function App() {
       </main>
 
       <Footer config={config} />
+
       {/* Mobile "view cart" bar */}
       {cartCount > 0 && !cartOpen && !checkoutOpen && (
         <button
@@ -1888,7 +1988,7 @@ export default function App() {
                     Your cart is empty
                   </p>
                   <p className="mt-1 text-sm text-slate-500">
-                    Add seafood now and enjoy it tomorrow.
+                    Add in-stock seafood and we will bring it in about 1 hour.
                   </p>
                   <button
                     type="button"
@@ -2052,8 +2152,9 @@ export default function App() {
                           {config.shop.pinCode}
                         </p>
                         <p className="mt-2 font-semibold">
-                          {formatScheduleDate(orderResult.date)},{" "}
-                          {orderResult.slotLabel}
+                          {orderResult.prebookDate
+                            ? `Ready for pickup on ${formatScheduleDate(orderResult.prebookDate)}`
+                            : "Ready in about 1 hour after your order is confirmed"}
                         </p>
                         <p className="mt-2 text-brand-700">
                           Show your order number when you collect.
@@ -2076,8 +2177,9 @@ export default function App() {
                           </p>
                         )}
                         <p className="mt-2 font-semibold">
-                          {formatScheduleDate(orderResult.date)},{" "}
-                          {orderResult.slotLabel}
+                          {orderResult.prebookDate
+                            ? `Delivery on ${formatScheduleDate(orderResult.prebookDate)}`
+                            : "Delivered in about 1 hour after your order is confirmed"}
                         </p>
                       </>
                     )}
@@ -2175,8 +2277,8 @@ export default function App() {
                         Checkout
                       </h2>
                       <p className="mt-1 flex items-center gap-1.5 text-sm text-slate-500">
-                        <CalendarDays size={14} className="text-brand-500" />
-                        Pre-order for tomorrow, {formatScheduleDate(tomorrowDate)}
+                        <Clock size={14} className="text-brand-500" />
+                        In-stock orders are delivered in about 1 hour
                       </p>
                     </div>
                     <button
@@ -2403,73 +2505,57 @@ export default function App() {
                         )}
                       </section>
                     )}
-                    {/* ---------------- Time slot ---------------- */}
+
+                    {/* ---------------- When ---------------- */}
                     <section className="rounded-3xl border border-brand-100 bg-white p-5 shadow-soft">
                       <StepTitle number="4">
                         {fulfillmentMethod === "takeaway"
                           ? "Pickup time"
                           : "Delivery time"}
-                        {slotData.date && (
-                          <span className="rounded-full bg-brand-50 px-3 py-0.5 text-xs font-semibold text-brand-700">
-                            {formatScheduleDate(slotData.date)}
-                          </span>
-                        )}
                       </StepTitle>
-
-                      {slotsLoading ? (
-                        <p className="mt-3 text-sm text-slate-500">
-                          Loading time slots...
-                        </p>
-                      ) : slotsError ? (
-                        <div className="mt-3 rounded-2xl bg-red-50 p-4">
-                          <p className="text-sm text-red-600">{slotsError}</p>
-                          <button
-                            type="button"
-                            onClick={() => setSlotsReload((count) => count + 1)}
-                            className="mt-2 text-sm font-semibold text-brand-700 underline"
-                          >
-                            Try again
-                          </button>
-                        </div>
-                      ) : (
-                        <div className="mt-4 grid grid-cols-2 gap-2.5 sm:grid-cols-3">
-                          {slotData.slots.map((slot) => {
-                            const on = selectedSlotId === slot.id;
-
-                            return (
+                      {cartIsPrebook && (
+                        <div className="mt-3">
+                          <p className="flex items-start gap-2 rounded-2xl bg-amber-50 p-4 text-sm text-amber-900">
+                            <Clock className="mt-0.5 h-5 w-5 shrink-0 text-amber-600" />
+                            These are pre-book items. Choose the date you want
+                            them{" "}
+                            {fulfillmentMethod === "takeaway"
+                              ? "ready for pickup."
+                              : "delivered."}
+                          </p>
+                          <div className="mt-3 grid grid-cols-2 gap-2 sm:grid-cols-4">
+                            {prebookDates.map((date) => (
                               <button
-                                key={slot.id}
+                                key={date}
                                 type="button"
-                                disabled={!slot.available}
-                                onClick={() => setSelectedSlotId(slot.id)}
-                                aria-pressed={on}
-                                className={`rounded-2xl border-2 px-3 py-3 text-left text-sm transition disabled:cursor-not-allowed disabled:bg-slate-50 disabled:text-slate-400 ${on
-                                  ? "border-brand-500 bg-brand-50 text-brand-900 shadow-soft"
-                                  : "border-slate-200 hover:border-brand-300"
+                                onClick={() => setPrebookDate(date)}
+                                aria-pressed={prebookDate === date}
+                                className={`rounded-2xl border-2 px-3 py-3 text-sm font-semibold transition ${prebookDate === date
+                                  ? "border-brand-500 bg-brand-50 text-brand-800"
+                                  : "border-slate-200 text-slate-600 hover:border-brand-300"
                                   }`}
                               >
-                                <span className="block font-semibold">
-                                  {slot.label}
-                                </span>
-                                <span
-                                  className={`mt-0.5 block text-xs font-medium ${!slot.available
-                                    ? "text-slate-400"
-                                    : slot.remaining <= 3
-                                      ? "text-amber-700"
-                                      : "text-emerald-700"
-                                    }`}
-                                >
-                                  {!slot.available
-                                    ? "Full"
-                                    : slot.remaining <= 3
-                                      ? `${slot.remaining} left`
-                                      : "Available"}
-                                </span>
+                                {formatScheduleDate(date)}
                               </button>
-                            );
-                          })}
+                            ))}
+                          </div>
+                          {prebookDates.length === 0 && (
+                            <p className="mt-2 text-xs text-red-600">
+                              Pre-book dates could not be loaded. Please
+                              refresh the page.
+                            </p>
+                          )}
                         </div>
                       )}
+                      <p
+                        className={`mt-3 flex items-start gap-2 rounded-2xl bg-brand-50 p-4 text-sm text-brand-900 ${cartIsPrebook ? "hidden" : ""
+                          }`}
+                      >
+                        <Clock className="mt-0.5 h-5 w-5 shrink-0 text-brand-600" />
+                        {fulfillmentMethod === "takeaway"
+                          ? "Your order will be ready for pickup in about 1 hour after it is confirmed."
+                          : "Your order will be delivered in about 1 hour after it is confirmed."}
+                      </p>
                     </section>
 
                     {/* ---------------- Payment ---------------- */}
@@ -2730,7 +2816,7 @@ export default function App() {
                     No orders yet
                   </p>
                   <p className="mt-1 text-sm text-slate-500">
-                    Pre-order today and your order will show up here.
+                    Place an order and it will show up here.
                   </p>
                 </div>
               ) : (
@@ -2902,6 +2988,7 @@ export default function App() {
           <span>{toast}</span>
         </div>
       )}
+
       {/* Background bubbles and fish (styled in App.css) */}
       <div className="ocean-background" aria-hidden="true">
         <span className="ocean-bubble bubble-1" />

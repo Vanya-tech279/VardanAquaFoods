@@ -19,12 +19,14 @@ cloudinary.config({
     api_secret: process.env.CLOUDINARY_API_SECRET,
 });
 
+// Used for product images uploaded by the admin.
 const upload = multer({
     storage: multer.memoryStorage(),
     limits: {
         fileSize: 5 * 1024 * 1024,
     },
 });
+
 const app = express();
 const PORT = process.env.PORT || 5000;
 
@@ -34,6 +36,9 @@ app.use(express.json());
 let db;
 let ordersCollection;
 let customerAddressesCollection;
+
+// Fills in anything an older product document is missing, so every
+// product sent to the website has the same shape.
 function normalizeProduct(product) {
     const variants =
         Array.isArray(product.variants) && product.variants.length > 0
@@ -61,6 +66,12 @@ function normalizeProduct(product) {
 
     return {
         ...product,
+        // "regular" = normal cart and checkout. "special" = WhatsApp enquiry only.
+        // Old products have no orderType saved, so they count as regular.
+        orderType: product.orderType === "special" ? "special" : "regular",
+        // true = the customer must order a day or more ahead (Pre-book).
+        // Old products have no prebook saved, so they count as false.
+        prebook: product.prebook === true,
         variants: normalizedVariants,
         pricePerKg: product.pricePerKg ?? normalizedVariants[0].pricePerKg,
         stockKg:
@@ -411,6 +422,7 @@ app.post("/api/admin/login", async (req, res) => {
         });
     }
 });
+
 function requireAdmin(req, res, next) {
     const authHeader = req.headers.authorization;
 
@@ -510,6 +522,100 @@ app.get("/api/products", async (req, res) => {
     }
 });
 
+// ---------- Address helpers ----------
+
+// Cleans and checks the text fields of an address.
+// Returns { address } when valid, or { error } when not.
+function cleanAddressInput(body) {
+    const text = (value) => (typeof value === "string" ? value.trim() : "");
+
+    const address = {
+        label: text(body?.label) || "Home",
+        recipientName: text(body?.recipientName),
+        phone: text(body?.phone),
+        houseNumber: text(body?.houseNumber),
+        street: text(body?.street),
+        locality: text(body?.locality),
+        city: text(body?.city),
+        state: text(body?.state),
+        pinCode: text(String(body?.pinCode ?? "")),
+        landmark: text(body?.landmark),
+    };
+
+    const requiredFields = [
+        "recipientName",
+        "houseNumber",
+        "street",
+        "locality",
+        "city",
+        "state",
+    ];
+
+    if (requiredFields.some((field) => !address[field])) {
+        return { error: "Please fill in all required address details." };
+    }
+
+    if (!/^\d{10}$/.test(address.phone)) {
+        return { error: "Enter a valid 10-digit phone number." };
+    }
+
+    if (!/^\d{6}$/.test(address.pinCode)) {
+        return { error: "Enter a valid 6-digit PIN code." };
+    }
+
+    if (Object.values(address).some((value) => value.length > 120)) {
+        return { error: "One of the address fields is too long." };
+    }
+
+    return { address };
+}
+
+// Checks GPS coordinates sent by the browser.
+// Returns { latitude, longitude } or null when missing or invalid.
+function parseCoordinates(latitude, longitude) {
+    if (
+        latitude === undefined ||
+        latitude === null ||
+        latitude === "" ||
+        longitude === undefined ||
+        longitude === null ||
+        longitude === ""
+    ) {
+        return null;
+    }
+
+    const lat = Number(latitude);
+    const lng = Number(longitude);
+
+    if (
+        !Number.isFinite(lat) ||
+        !Number.isFinite(lng) ||
+        lat < -90 ||
+        lat > 90 ||
+        lng < -180 ||
+        lng > 180
+    ) {
+        return null;
+    }
+
+    return { latitude: lat, longitude: lng };
+}
+
+// True when the browser sent coordinates (valid or not).
+function coordinatesWereSent(body) {
+    return (
+        body?.latitude !== undefined &&
+        body?.latitude !== null &&
+        body?.latitude !== ""
+    ) || (
+            body?.longitude !== undefined &&
+            body?.longitude !== null &&
+            body?.longitude !== ""
+        );
+}
+
+// ---------- Customer addresses ----------
+
 app.get("/api/addresses/my", requireCustomer, async (req, res) => {
     try {
         const addresses = await customerAddressesCollection
@@ -530,190 +636,6 @@ app.get("/api/addresses/my", requireCustomer, async (req, res) => {
         });
     }
 });
-
-// ---------- Address helpers ----------
-
-// Cleans and checks the text fields of an address.
-// Returns { address } when valid, or { error } when not.
-function cleanAddressInput(body) {
-    const text = (value) => (typeof value === "string" ? value.trim() : "");
-
-    const address = {
-        label: text(body?.label) || "Home",
-        recipientName: text(body?.recipientName),
-        phone: text(body?.phone),
-        houseNumber: text(body?.houseNumber),
-        street: text(body?.street),
-        locality: text(body?.locality),
-        city: text(body?.city),
-        state: text(body?.state),
-        pinCode: text(String(body?.pinCode ?? "")),
-        landmark: text(body?.landmark),
-    };
-
-    const requiredFields = [
-        "recipientName",
-        "houseNumber",
-        "street",
-        "locality",
-        "city",
-        "state",
-    ];
-
-    if (requiredFields.some((field) => !address[field])) {
-        return { error: "Please fill in all required address details." };
-    }
-
-    if (!/^\d{10}$/.test(address.phone)) {
-        return { error: "Enter a valid 10-digit phone number." };
-    }
-
-    if (!/^\d{6}$/.test(address.pinCode)) {
-        return { error: "Enter a valid 6-digit PIN code." };
-    }
-
-    if (Object.values(address).some((value) => value.length > 120)) {
-        return { error: "One of the address fields is too long." };
-    }
-
-    return { address };
-}
-
-// Checks GPS coordinates sent by the browser.
-// Returns { latitude, longitude } or null when missing or invalid.
-function parseCoordinates(latitude, longitude) {
-    if (
-        latitude === undefined ||
-        latitude === null ||
-        latitude === "" ||
-        longitude === undefined ||
-        longitude === null ||
-        longitude === ""
-    ) {
-        return null;
-    }
-
-    const lat = Number(latitude);
-    const lng = Number(longitude);
-
-    if (
-        !Number.isFinite(lat) ||
-        !Number.isFinite(lng) ||
-        lat < -90 ||
-        lat > 90 ||
-        lng < -180 ||
-        lng > 180
-    ) {
-        return null;
-    }
-
-    return { latitude: lat, longitude: lng };
-}
-
-// True when the browser sent coordinates (valid or not).
-function coordinatesWereSent(body) {
-    return (
-        body?.latitude !== undefined &&
-        body?.latitude !== null &&
-        body?.latitude !== ""
-    ) || (
-            body?.longitude !== undefined &&
-            body?.longitude !== null &&
-            body?.longitude !== ""
-        );
-}
-
-// ---------- Address helpers ----------
-
-// Cleans and checks the text fields of an address.
-// Returns { address } when valid, or { error } when not.
-function cleanAddressInput(body) {
-    const text = (value) => (typeof value === "string" ? value.trim() : "");
-
-    const address = {
-        label: text(body?.label) || "Home",
-        recipientName: text(body?.recipientName),
-        phone: text(body?.phone),
-        houseNumber: text(body?.houseNumber),
-        street: text(body?.street),
-        locality: text(body?.locality),
-        city: text(body?.city),
-        state: text(body?.state),
-        pinCode: text(String(body?.pinCode ?? "")),
-        landmark: text(body?.landmark),
-    };
-
-    const requiredFields = [
-        "recipientName",
-        "houseNumber",
-        "street",
-        "locality",
-        "city",
-        "state",
-    ];
-
-    if (requiredFields.some((field) => !address[field])) {
-        return { error: "Please fill in all required address details." };
-    }
-
-    if (!/^\d{10}$/.test(address.phone)) {
-        return { error: "Enter a valid 10-digit phone number." };
-    }
-
-    if (!/^\d{6}$/.test(address.pinCode)) {
-        return { error: "Enter a valid 6-digit PIN code." };
-    }
-
-    if (Object.values(address).some((value) => value.length > 120)) {
-        return { error: "One of the address fields is too long." };
-    }
-
-    return { address };
-}
-
-// Checks GPS coordinates sent by the browser.
-// Returns { latitude, longitude } or null when missing or invalid.
-function parseCoordinates(latitude, longitude) {
-    if (
-        latitude === undefined ||
-        latitude === null ||
-        latitude === "" ||
-        longitude === undefined ||
-        longitude === null ||
-        longitude === ""
-    ) {
-        return null;
-    }
-
-    const lat = Number(latitude);
-    const lng = Number(longitude);
-
-    if (
-        !Number.isFinite(lat) ||
-        !Number.isFinite(lng) ||
-        lat < -90 ||
-        lat > 90 ||
-        lng < -180 ||
-        lng > 180
-    ) {
-        return null;
-    }
-
-    return { latitude: lat, longitude: lng };
-}
-
-// True when the browser sent coordinates (valid or not).
-function coordinatesWereSent(body) {
-    return (
-        body?.latitude !== undefined &&
-        body?.latitude !== null &&
-        body?.latitude !== ""
-    ) || (
-            body?.longitude !== undefined &&
-            body?.longitude !== null &&
-            body?.longitude !== ""
-        );
-}
 
 // Save a new address
 app.post("/api/addresses", requireCustomer, async (req, res) => {
@@ -846,6 +768,7 @@ app.patch("/api/addresses/:id", requireCustomer, async (req, res) => {
         });
     }
 });
+
 app.delete("/api/addresses/:id", requireCustomer, async (req, res) => {
     try {
         const { id } = req.params;
@@ -883,11 +806,25 @@ app.delete("/api/addresses/:id", requireCustomer, async (req, res) => {
     }
 });
 
+// ---------- Customer order history ----------
 
 app.get("/api/orders/my", requireCustomer, async (req, res) => {
     try {
         const orders = await ordersCollection
-            .find({ customerId: req.customerId })
+            .find(
+                { customerId: req.customerId },
+                {
+                    // Customers never need the payment screenshot record or the
+                    // admin's private notes, so they are not sent.
+                    projection: {
+                        manualPayment: 0,
+                        rejectedPayments: 0,
+                        cancelledBy: 0,
+                        razorpayOrderId: 0,
+                        razorpayPaymentId: 0,
+                    },
+                }
+            )
             .sort({ createdAt: -1 })
             .toArray();
 
@@ -904,13 +841,17 @@ app.get("/api/orders/my", requireCustomer, async (req, res) => {
         });
     }
 });
+
+// ---------- Route files ----------
+
 app.use(createOrderRoutes({ getDb: () => db, requireCustomer }));
 app.use(createLocationRoutes());
 app.use(createManualPaymentRoutes({ getDb: () => db, requireCustomer }));
 app.use(createAdminOrderRoutes({ getDb: () => db, requireAdmin }));
+
+// ---------- Products (admin) ----------
+
 // Add a new product
-
-
 app.post("/api/products", requireAdmin, async (req, res) => {
     try {
         const {
@@ -1020,7 +961,22 @@ app.post("/api/products", requireAdmin, async (req, res) => {
             0
         );
 
+        // Optional. Only "regular" or "special" is allowed.
+        const orderType =
+            req.body.orderType === undefined ? "regular" : req.body.orderType;
+
+        if (!["regular", "special"].includes(orderType)) {
+            return res.status(400).json({
+                success: false,
+                message: "Order type must be regular or special.",
+            });
+        }
+
         const product = {
+            orderType,
+            // New products start as normal (not pre-book). The admin can
+            // switch pre-book on later from the Products screen.
+            prebook: false,
             name: name.trim(),
             category: category.trim(),
             variants: normalizedVariants,
@@ -1051,9 +1007,6 @@ app.post("/api/products", requireAdmin, async (req, res) => {
         });
     }
 });
-
-
-
 
 app.patch("/api/products/:id", requireAdmin, async (req, res) => {
     try {
@@ -1098,7 +1051,6 @@ app.patch("/api/products/:id", requireAdmin, async (req, res) => {
         }
 
         // Update all variants together when the variants array is supplied.
-
         if (variants !== undefined) {
             if (
                 !Array.isArray(variants) ||
@@ -1258,6 +1210,61 @@ app.patch("/api/products/:id", requireAdmin, async (req, res) => {
             }
         }
 
+        // Pre-book switch: true or false only.
+        if (req.body.prebook !== undefined) {
+            if (typeof req.body.prebook !== "boolean") {
+                return res.status(400).json({
+                    success: false,
+                    message: "Pre-book must be true or false.",
+                });
+            }
+            updates.prebook = req.body.prebook;
+        }
+
+        // The admin can switch a product between regular and special at any
+        // time, independent of its stock.
+        if (req.body.orderType !== undefined) {
+            if (!["regular", "special"].includes(req.body.orderType)) {
+                return res.status(400).json({
+                    success: false,
+                    message: "Order type must be regular or special.",
+                });
+            }
+            updates.orderType = req.body.orderType;
+        }
+
+        // A special product is WhatsApp-only, so it can never be pre-book.
+        if (updates.orderType !== undefined || updates.prebook !== undefined) {
+            const currentProduct = await db.collection("products").findOne({
+                _id: new ObjectId(id),
+            });
+
+            if (!currentProduct) {
+                return res.status(404).json({
+                    success: false,
+                    message: "Product not found.",
+                });
+            }
+
+            const finalOrderType =
+                updates.orderType ??
+                (currentProduct.orderType === "special" ? "special" : "regular");
+            const finalPrebook =
+                updates.prebook ?? currentProduct.prebook === true;
+
+            if (finalOrderType === "special" && finalPrebook) {
+                if (updates.prebook === true) {
+                    return res.status(400).json({
+                        success: false,
+                        message:
+                            "Special products are WhatsApp-only and cannot be pre-booked.",
+                    });
+                }
+
+                // Switching a pre-book product to special turns pre-book off.
+                updates.prebook = false;
+            }
+        }
 
         if (imageUrl !== undefined) {
             if (
@@ -1311,7 +1318,6 @@ app.patch("/api/products/:id", requireAdmin, async (req, res) => {
     }
 });
 
-
 app.delete("/api/products/:id", requireAdmin, async (req, res) => {
     try {
         const { id } = req.params;
@@ -1348,6 +1354,7 @@ app.delete("/api/products/:id", requireAdmin, async (req, res) => {
     }
 });
 
+// ---------- Health checks ----------
 
 app.get("/", (req, res) => {
     res.json({
@@ -1376,7 +1383,9 @@ async function startServer() {
     ordersCollection = db.collection("orders");
     customerAddressesCollection = db.collection("customer_addresses");
     console.log("MongoDB connected successfully!");
+
     startOrderExpiry({ getDb: () => db });
+
     app.listen(PORT, () => {
         console.log(`API running at http://localhost:${PORT}`);
     });

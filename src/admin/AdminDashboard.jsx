@@ -16,7 +16,7 @@ import AdminLogin from "./AdminLogin";
 import OrdersPanel from "./OrdersPanel";
 import { mapOrder } from "./orderUtils";
 
-const API = import.meta.env.VITE_API_URL;
+const API = import.meta.env.VITE_API_URL || "http://localhost:5000";
 
 const navItems = [
     { label: "Overview", icon: LayoutDashboard },
@@ -25,6 +25,21 @@ const navItems = [
     { label: "Customers", icon: Users },
     { label: "Settings", icon: Settings },
 ];
+
+// A fresh "Add product" form. A function, so every use gets a new copy.
+function emptyNewProduct() {
+    return {
+        name: "",
+        category: "",
+        orderType: "regular",
+        variants: [
+            { size: "S", pricePerKg: "", stockKg: "" },
+            { size: "M", pricePerKg: "", stockKg: "" },
+            { size: "L", pricePerKg: "", stockKg: "" },
+        ],
+        image: null,
+    };
+}
 
 export default function AdminDashboard() {
     const [orders, setOrders] = useState([]);
@@ -42,8 +57,8 @@ export default function AdminDashboard() {
         () => sessionStorage.getItem("vafAdminToken") || ""
     );
     const [editValues, setEditValues] = useState({
-        pricePerKg: "",
-        stockKg: "",
+        orderType: "regular",
+        variants: [],
     });
 
     function handleLogin(token) {
@@ -221,6 +236,52 @@ export default function AdminDashboard() {
         return postAdminAction(`/api/admin/orders/${orderId}/cancel`, { reason });
     }
 
+    // Permanently deletes a finished order (Cancelled, Delivered or Completed).
+    // confirmRefunded = true is sent when the admin confirmed the customer
+    // was already refunded for an order that was marked "refund due".
+    async function deleteOrder(orderId, confirmRefunded) {
+        try {
+            const response = await fetch(`${API}/api/admin/orders/${orderId}`, {
+                method: "DELETE",
+                headers: {
+                    "Content-Type": "application/json",
+                    Authorization: `Bearer ${adminToken}`,
+                },
+                body: JSON.stringify({ confirmRefunded: Boolean(confirmRefunded) }),
+            });
+
+            if (response.status === 401 || response.status === 403) {
+                handleLogout();
+                return { ok: false, message: "Your admin session expired." };
+            }
+
+            let data = {};
+
+            try {
+                data = await response.json();
+            } catch {
+                data = {};
+            }
+
+            // Reload even on failure, because the list may be out of date.
+            await loadOrders({ quiet: true });
+
+            if (!response.ok || !data.success) {
+                return {
+                    ok: false,
+                    message: data.message || "Could not delete the order.",
+                };
+            }
+
+            return { ok: true, message: data.message || "Order deleted." };
+        } catch {
+            return {
+                ok: false,
+                message: "Could not reach the server. Check that the backend is running.",
+            };
+        }
+    }
+
     // Load orders when signed in, then refresh every 30 seconds.
     useEffect(() => {
         if (!adminToken) return;
@@ -257,8 +318,11 @@ export default function AdminDashboard() {
                     fetchedProducts.map((product) => ({
                         ...product,
                         id: product._id,
+                        orderType:
+                            product.orderType === "special" ? "special" : "regular",
                         available:
                             product.available ?? Number(product.stockKg) > 0,
+                        prebook: product.prebook === true,
                     }))
                 );
             } catch (error) {
@@ -461,6 +525,7 @@ export default function AdminDashboard() {
                                 onLoadProof={loadProof}
                                 onPaymentAction={paymentAction}
                                 onCancelOrder={cancelOrder}
+                                onDeleteOrder={deleteOrder}
                                 onViewAll={() => setActiveNav("Orders")}
                             />
                         </>
@@ -475,12 +540,13 @@ export default function AdminDashboard() {
                             onLoadProof={loadProof}
                             onPaymentAction={paymentAction}
                             onCancelOrder={cancelOrder}
+                            onDeleteOrder={deleteOrder}
                         />
                     ) : activeNav === "Products & Stock" ? (
                         productsLoading ? (
                             <section className="rounded-3xl border border-brand-100 bg-white p-10 text-center">
                                 <p className="font-semibold text-slate-700">
-                                    Loading products from MongoDB...
+                                    Loading products...
                                 </p>
                             </section>
                         ) : productsError ? (
@@ -547,6 +613,22 @@ function ShieldCheckIcon() {
     return <CheckCircle2 size={19} />;
 }
 
+// Small coloured label showing whether a product is regular or special.
+function OrderTypeBadge({ orderType }) {
+    const special = orderType === "special";
+
+    return (
+        <span
+            className={`rounded-full px-2.5 py-1 text-[11px] font-bold ${special
+                ? "bg-violet-50 text-violet-700"
+                : "bg-sky-50 text-sky-700"
+                }`}
+        >
+            {special ? "Special (WhatsApp)" : "Regular"}
+        </span>
+    );
+}
+
 function InventoryScreen({
     products,
     setProducts,
@@ -556,22 +638,13 @@ function InventoryScreen({
     setEditValues,
     adminToken,
 }) {
-    const API = import.meta.env.VITE_API_URL;
     const [search, setSearch] = useState("");
     const [stockFilter, setStockFilter] = useState("All");
     const [categoryFilter, setCategoryFilter] = useState("All");
     const [showAddForm, setShowAddForm] = useState(false);
-    const [newProduct, setNewProduct] = useState({
-        name: "",
-        category: "",
-        variants: [
-            { size: "S", pricePerKg: "", stockKg: "" },
-            { size: "M", pricePerKg: "", stockKg: "" },
-            { size: "L", pricePerKg: "", stockKg: "" },
-        ],
-        image: null,
-    });
+    const [newProduct, setNewProduct] = useState(emptyNewProduct);
     const [addingProduct, setAddingProduct] = useState(false);
+
     function updateNewVariant(index, field, value) {
         setNewProduct((current) => ({
             ...current,
@@ -613,6 +686,7 @@ function InventoryScreen({
 
         const name = newProduct.name.trim();
         const category = newProduct.category;
+        const orderType = newProduct.orderType === "special" ? "special" : "regular";
 
         const variants = newProduct.variants.map((variant) => ({
             size: variant.size,
@@ -640,10 +714,12 @@ function InventoryScreen({
             alert("Please enter a valid price and stock for every size.");
             return;
         }
+
         if (variants.some((variant) => !Number.isInteger(variant.stockKg))) {
             alert("Stock must be a whole number of kg.");
             return;
         }
+
         setAddingProduct(true);
 
         try {
@@ -654,16 +730,13 @@ function InventoryScreen({
                 const imageFormData = new FormData();
                 imageFormData.append("image", newProduct.image);
 
-                const uploadResponse = await fetch(
-                    `${API}/api/uploads`,
-                    {
-                        method: "POST",
-                        headers: {
-                            Authorization: `Bearer ${adminToken}`,
-                        },
-                        body: imageFormData,
-                    }
-                );
+                const uploadResponse = await fetch(`${API}/api/uploads`, {
+                    method: "POST",
+                    headers: {
+                        Authorization: `Bearer ${adminToken}`,
+                    },
+                    body: imageFormData,
+                });
 
                 const uploadData = await uploadResponse.json();
 
@@ -676,23 +749,20 @@ function InventoryScreen({
             }
 
             // Step B: Save product details and image URL
-            const response = await fetch(
-                `${API}/api/products`,
-                {
-                    method: "POST",
-                    headers: {
-                        "Content-Type": "application/json",
-                        Authorization: `Bearer ${adminToken}`,
-                    },
-                    body: JSON.stringify({
-                        name,
-                        category,
-                        variants,
-                        imageUrl,
-                    }),
-                }
-            );
-
+            const response = await fetch(`${API}/api/products`, {
+                method: "POST",
+                headers: {
+                    "Content-Type": "application/json",
+                    Authorization: `Bearer ${adminToken}`,
+                },
+                body: JSON.stringify({
+                    name,
+                    category,
+                    orderType,
+                    variants,
+                    imageUrl,
+                }),
+            });
 
             const data = await response.json();
 
@@ -712,23 +782,16 @@ function InventoryScreen({
                 {
                     ...savedProduct,
                     id: savedProduct._id,
+                    orderType:
+                        savedProduct.orderType === "special" ? "special" : "regular",
                     available:
                         savedProduct.available ??
                         Number(savedProduct.stockKg) > 0,
+                    prebook: savedProduct.prebook === true,
                 },
             ]);
 
-            setNewProduct({
-                name: "",
-                category: "",
-                variants: [
-                    { size: "S", pricePerKg: "", stockKg: "" },
-                    { size: "M", pricePerKg: "", stockKg: "" },
-                    { size: "L", pricePerKg: "", stockKg: "" },
-                ],
-                image: null,
-            });
-
+            setNewProduct(emptyNewProduct());
             setShowAddForm(false);
             alert("Product added successfully!");
         } catch (error) {
@@ -738,7 +801,6 @@ function InventoryScreen({
             setAddingProduct(false);
         }
     }
-
 
     const money = (amount) =>
         new Intl.NumberFormat("en-IN", {
@@ -766,9 +828,6 @@ function InventoryScreen({
     const inStockCount = products.filter((p) => p.available).length;
     const outOfStockCount = products.length - inStockCount;
 
-
-
-
     async function saveProduct(id) {
         const variants = editValues.variants?.map((variant) => ({
             size: variant.size,
@@ -776,6 +835,7 @@ function InventoryScreen({
             stockKg: Number(variant.stockKg),
             available: Boolean(variant.available),
         }));
+        const orderType = editValues.orderType === "special" ? "special" : "regular";
 
         if (
             !variants ||
@@ -800,17 +860,20 @@ function InventoryScreen({
         }
 
         try {
-            const response = await fetch(
-                `${API}/api/products/${id}` ,
-                {               
+            // A special product is WhatsApp-only, so it cannot also be pre-book.
+            const body =
+                orderType === "special"
+                    ? { variants, orderType, prebook: false }
+                    : { variants, orderType };
+
+            const response = await fetch(`${API}/api/products/${id}`, {
                 method: "PATCH",
                 headers: {
                     "Content-Type": "application/json",
                     Authorization: `Bearer ${adminToken}`,
                 },
-                body: JSON.stringify({ variants }),
-            }
-            );
+                body: JSON.stringify(body),
+            });
 
             const data = await response.json();
 
@@ -832,6 +895,11 @@ function InventoryScreen({
                             ...product,
                             ...updatedProduct,
                             id: updatedProduct._id || product.id,
+                            orderType:
+                                updatedProduct.orderType === "special"
+                                    ? "special"
+                                    : "regular",
+                            prebook: updatedProduct.prebook === true,
                         }
                         : product
                 )
@@ -845,6 +913,51 @@ function InventoryScreen({
         }
     }
 
+    // Switches Pre-book on or off for one product.
+    async function togglePrebook(product) {
+        const nextPrebook = !product.prebook;
+
+        if (nextPrebook && product.orderType === "special") {
+            alert(
+                "Special products are WhatsApp-only and cannot be pre-booked. Change the order type to Regular first."
+            );
+            return;
+        }
+
+        try {
+            const response = await fetch(`${API}/api/products/${product.id}`, {
+                method: "PATCH",
+                headers: {
+                    "Content-Type": "application/json",
+                    Authorization: `Bearer ${adminToken}`,
+                },
+                body: JSON.stringify({ prebook: nextPrebook }),
+            });
+
+            const data = await response.json();
+
+            if (!response.ok || !data.success) {
+                throw new Error(data.message || "Failed to update pre-book.");
+            }
+
+            setProducts((current) =>
+                current.map((item) =>
+                    item.id === product.id
+                        ? { ...item, prebook: nextPrebook }
+                        : item
+                )
+            );
+
+            alert(
+                nextPrebook
+                    ? "Product is now on pre-book."
+                    : "Pre-book turned off for this product."
+            );
+        } catch (error) {
+            console.error("Pre-book update failed:", error);
+            alert(error.message || "Could not update pre-book.");
+        }
+    }
 
     async function deleteProduct(product) {
         const confirmed = window.confirm(
@@ -854,14 +967,12 @@ function InventoryScreen({
         if (!confirmed) return;
 
         try {
-            const response = await fetch(
-                `${API}/api/products/${product.id}`  ,             {
+            const response = await fetch(`${API}/api/products/${product.id}`, {
                 method: "DELETE",
                 headers: {
                     Authorization: `Bearer ${adminToken}`,
                 },
-            }
-            );
+            });
 
             const data = await response.json();
 
@@ -885,26 +996,20 @@ function InventoryScreen({
         }
     }
 
-
-
-
     async function toggleAvailability(product) {
         const nextAvailability = !product.available;
 
         try {
-            const response = await fetch(
-                `http://localhost:5000/api/products/${product.id}`,
-                {
-                    method: "PATCH",
-                    headers: {
-                        "Content-Type": "application/json",
-                        Authorization: `Bearer ${adminToken}`,
-                    },
-                    body: JSON.stringify({
-                        available: nextAvailability,
-                    }),
-                }
-            );
+            const response = await fetch(`${API}/api/products/${product.id}`, {
+                method: "PATCH",
+                headers: {
+                    "Content-Type": "application/json",
+                    Authorization: `Bearer ${adminToken}`,
+                },
+                body: JSON.stringify({
+                    available: nextAvailability,
+                }),
+            });
 
             const data = await response.json();
 
@@ -923,6 +1028,12 @@ function InventoryScreen({
                             ...item,
                             ...(updatedProduct || {}),
                             id: updatedProduct?._id || item.id,
+                            orderType:
+                                (updatedProduct?.orderType ?? item.orderType) ===
+                                    "special"
+                                    ? "special"
+                                    : "regular",
+                            prebook: (updatedProduct?.prebook ?? item.prebook) === true,
                             available: nextAvailability,
                         }
                         : item
@@ -940,7 +1051,6 @@ function InventoryScreen({
         }
     }
 
-
     return (
         <div className="space-y-7">
 
@@ -953,7 +1063,7 @@ function InventoryScreen({
                         Products & Inventory
                     </h2>
                     <p className="mt-2 text-sm text-slate-500">
-                        Manage seafood prices, stock and availability.
+                        Manage seafood prices, stock, availability, pre-book and order type.
                     </p>
                 </div>
 
@@ -992,7 +1102,6 @@ function InventoryScreen({
                             />
                         </div>
 
-
                         <div>
                             <label className="mb-2 block text-sm font-semibold">
                                 Category
@@ -1018,7 +1127,55 @@ function InventoryScreen({
                             </select>
                         </div>
 
+                        <div>
+                            <label className="mb-2 block text-sm font-semibold">
+                                Order type
+                            </label>
+                            <select
+                                value={newProduct.orderType}
+                                onChange={(event) =>
+                                    setNewProduct((current) => ({
+                                        ...current,
+                                        orderType: event.target.value,
+                                    }))
+                                }
+                                className="w-full rounded-xl border border-slate-200 bg-white px-4 py-3 text-sm outline-none focus:border-blue-400"
+                            >
+                                <option value="regular">
+                                    Regular (cart and checkout)
+                                </option>
+                                <option value="special">
+                                    Special (WhatsApp enquiry only)
+                                </option>
+                            </select>
+                            <p className="mt-1 text-xs text-slate-500">
+                                Special products cannot be bought through checkout.
+                            </p>
+                        </div>
 
+                        <div>
+                            <label className="mb-2 block text-sm font-medium text-gray-700">
+                                Product Image
+                            </label>
+
+                            <input
+                                type="file"
+                                accept="image/png,image/jpeg,image/webp"
+                                onChange={(event) =>
+                                    setNewProduct((current) => ({
+                                        ...current,
+                                        image: event.target.files?.[0] || null,
+                                    }))
+                                }
+                                className="w-full rounded-lg border border-gray-300 p-3"
+                            />
+
+                            {newProduct.image && (
+                                <p className="mt-2 text-sm text-green-700">
+                                    Selected: {newProduct.image.name}
+                                </p>
+                            )}
+                        </div>
 
                         <div className="sm:col-span-2">
                             <div className="mb-3 flex flex-wrap items-center justify-between gap-3">
@@ -1076,7 +1233,7 @@ function InventoryScreen({
 
                                         <div>
                                             <label className="mb-2 block text-sm font-semibold">
-                                                Stock (kg)
+                                                Stock (whole kg)
                                             </label>
                                             <input
                                                 required
@@ -1105,32 +1262,6 @@ function InventoryScreen({
                             </div>
                         </div>
 
-
-                        <div>
-                            <label className="mb-2 block text-sm font-medium text-gray-700">
-                                Product Image
-                            </label>
-
-                            <input
-                                type="file"
-                                accept="image/png,image/jpeg,image/webp"
-                                onChange={(event) =>
-                                    setNewProduct((current) => ({
-                                        ...current,
-                                        image: event.target.files?.[0] || null,
-                                    }))
-                                }
-                                className="w-full rounded-lg border border-gray-300 p-3"
-                            />
-
-                            {newProduct.image && (
-                                <p className="mt-2 text-sm text-green-700">
-                                    Selected: {newProduct.image.name}
-                                </p>
-                            )}
-                        </div>
-
-
                         <button
                             type="submit"
                             disabled={addingProduct}
@@ -1142,12 +1273,11 @@ function InventoryScreen({
                 </section>
             )}
 
-
             <section className="grid gap-4 sm:grid-cols-3">
                 <InventoryStat
                     label="Total products"
                     value={products.length}
-                    description="Products in the demo catalogue"
+                    description="Products in your catalogue"
                     color="blue"
                 />
                 <InventoryStat
@@ -1169,7 +1299,7 @@ function InventoryScreen({
                     <div>
                         <h3 className="text-lg font-extrabold">Seafood catalogue</h3>
                         <p className="mt-1 text-sm text-slate-500">
-                            Edit a product to update its demo price and stock.
+                            Edit a product to update its price, stock and order type.
                         </p>
                     </div>
 
@@ -1228,8 +1358,37 @@ function InventoryScreen({
                                             <p className="mt-1 text-xs text-slate-400">
                                                 {product.id} · {product.category}
                                             </p>
-                                        </td>
 
+                                            {isEditing ? (
+                                                <label className="mt-3 block">
+                                                    <span className="text-xs font-semibold text-slate-600">
+                                                        Order type
+                                                    </span>
+                                                    <select
+                                                        aria-label="Order type"
+                                                        value={editValues.orderType}
+                                                        onChange={(event) =>
+                                                            setEditValues((current) => ({
+                                                                ...current,
+                                                                orderType: event.target.value,
+                                                            }))
+                                                        }
+                                                        className="mt-1 w-full rounded-lg border border-slate-200 bg-white px-2 py-2 text-sm outline-none focus:border-blue-400"
+                                                    >
+                                                        <option value="regular">
+                                                            Regular (cart and checkout)
+                                                        </option>
+                                                        <option value="special">
+                                                            Special (WhatsApp only)
+                                                        </option>
+                                                    </select>
+                                                </label>
+                                            ) : (
+                                                <div className="mt-2">
+                                                    <OrderTypeBadge orderType={product.orderType} />
+                                                </div>
+                                            )}
+                                        </td>
 
                                         <td className="px-6 py-5">
                                             {isEditing ? (
@@ -1267,8 +1426,8 @@ function InventoryScreen({
                                                             <input
                                                                 type="number"
                                                                 min="0"
-                                                                step="0.5"
-                                                                aria-label={`${variant.size} stock in kg`}
+                                                                step="1"
+                                                                aria-label={`${variant.size} stock in whole kg`}
                                                                 value={variant.stockKg}
                                                                 onChange={(event) =>
                                                                     setEditValues((current) => ({
@@ -1349,7 +1508,6 @@ function InventoryScreen({
                                             )}
                                         </td>
 
-
                                         <td className="px-6 py-5">
                                             <span
                                                 className={`rounded-full px-3 py-1.5 text-xs font-bold ${product.available
@@ -1384,6 +1542,10 @@ function InventoryScreen({
                                                             setEditingProduct(product.id);
 
                                                             setEditValues({
+                                                                orderType:
+                                                                    product.orderType === "special"
+                                                                        ? "special"
+                                                                        : "regular",
                                                                 variants: (
                                                                     product.variants?.length
                                                                         ? product.variants
@@ -1402,7 +1564,6 @@ function InventoryScreen({
                                                                         variant.available ?? Number(variant.stockKg) > 0,
                                                                 })),
                                                             });
-
                                                         }}
                                                         className="rounded-lg border border-blue-200 px-3 py-2 text-xs font-bold text-blue-700 hover:bg-blue-50"
                                                     >
@@ -1417,12 +1578,31 @@ function InventoryScreen({
                                                     </button>
 
                                                     <button
+                                                        onClick={() => togglePrebook(product)}
+                                                        disabled={
+                                                            product.orderType === "special" &&
+                                                            !product.prebook
+                                                        }
+                                                        title={
+                                                            product.orderType === "special" &&
+                                                                !product.prebook
+                                                                ? "Special products cannot be pre-booked"
+                                                                : ""
+                                                        }
+                                                        className={`rounded-lg border px-3 py-2 text-xs font-bold disabled:cursor-not-allowed disabled:opacity-40 ${product.prebook
+                                                            ? "border-amber-300 bg-amber-50 text-amber-700 hover:bg-amber-100"
+                                                            : "border-slate-200 text-slate-600 hover:bg-slate-100"
+                                                            }`}
+                                                    >
+                                                        {product.prebook ? "Stop pre-book" : "Pre-book"}
+                                                    </button>
+
+                                                    <button
                                                         onClick={() => deleteProduct(product)}
                                                         className="rounded-lg border border-red-200 px-3 py-2 text-xs font-bold text-red-700 hover:bg-red-50"
                                                     >
                                                         Delete
                                                     </button>
-
                                                 </div>
                                             )}
                                         </td>
@@ -1433,7 +1613,7 @@ function InventoryScreen({
                             {visibleProducts.length === 0 && (
                                 <tr>
                                     <td
-                                        colSpan="5"
+                                        colSpan="4"
                                         className="px-6 py-12 text-center text-sm text-slate-400"
                                     >
                                         No matching products found.
@@ -1445,8 +1625,8 @@ function InventoryScreen({
                 </div>
 
                 <div className="border-t border-slate-100 px-6 py-4 text-xs text-slate-400">
-                    Showing {visibleProducts.length} of {products.length} demo products.
-                    Changes are temporary and reset when the page reloads.
+                    Showing {visibleProducts.length} of {products.length} products.
+                    Changes are saved to the live database straight away.
                 </div>
             </section>
         </div>

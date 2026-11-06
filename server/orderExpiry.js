@@ -1,7 +1,8 @@
 // ---------------------------------------------------------------
 // orderExpiry.js
-// Cancels orders that were never paid and gives their stock and
-// time slot back, so unpaid orders cannot block other customers.
+// Cancels orders that were never paid and gives their stock (and,
+// for older orders, their time slot) back, so unpaid orders cannot
+// block other customers.
 //
 // Each order has its own deadline, "paymentDueAt". Orders whose
 // payment screenshot is waiting for the admin ("Under review")
@@ -66,23 +67,26 @@ async function expireUnpaidOrders(db) {
 
         if (claimed.modifiedCount !== 1) continue;
 
-        // Step 2: give the stock and the slot back.
+        // Step 2: give the stock back, and the slot too for older orders
+        // that were booked into one.
         try {
             if (Array.isArray(order.items)) {
                 await releaseStock(db, order.items);
             }
 
-            await releaseSlot(
-                db,
-                order.scheduledDate,
-                order.slot.id,
-                order.fulfillmentMethod
-            );
+            if (order.slot?.id && order.scheduledDate) {
+                await releaseSlot(
+                    db,
+                    order.scheduledDate,
+                    order.slot.id,
+                    order.fulfillmentMethod
+                );
+            }
 
-            console.log(`Expired unpaid order ${order._id}. Stock and slot released.`);
+            console.log(`Expired unpaid order ${order._id}. Stock released.`);
         } catch (error) {
             console.error(
-                `Could not release stock or slot for expired order ${order._id}:`,
+                `Could not release stock for expired order ${order._id}:`,
                 error.message
             );
         }
